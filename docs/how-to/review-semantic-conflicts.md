@@ -2,7 +2,7 @@
 
 The `conflicts` gate blocks planning on conflicts it can compute, such as two variants of one operation with different outcomes in overlapping contexts. It cannot see a contradiction in meaning: an order that forbids storing card numbers, and a spec that requires an export containing them. An optional LLM pass looks for those and asks you about each one. Its verdict is advisory: it never blocks planning.
 
-**Before you start:** Standing Orders 0.5.0 or newer, installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md). The pass is most useful after `/gsd:spec-phase`, because it reads the phase `SPEC.md`.
+**Before you start:** Standing Orders installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md). The pass is most useful after `/gsd:spec-phase`, because it reads the phase `SPEC.md`.
 
 ## 1. Let discuss-phase run it, or run it yourself
 

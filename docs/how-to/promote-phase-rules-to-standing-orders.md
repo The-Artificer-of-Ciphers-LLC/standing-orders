@@ -2,7 +2,7 @@
 
 A phase discussion often settles a rule that should hold everywhere: a prohibition the spec resolved, or a decision recorded in `CONTEXT.md`. Promoting it makes it a standing order in `.planning/standing-orders/ORDERS.yaml`, so every later phase it applies to is planned, enforced and traced against it.
 
-**Before you start:** Standing Orders 0.5.0 or newer, installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md).
+**Before you start:** Standing Orders installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md).
 
 ## 1. Discuss the phase as usual
 

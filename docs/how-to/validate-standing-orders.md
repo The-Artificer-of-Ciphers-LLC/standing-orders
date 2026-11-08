@@ -2,7 +2,7 @@
 
 Check a project's standing orders for schema errors, undefined or cyclic contexts, and conflicting rules before planning depends on them.
 
-**Before you start:** Node 22 or newer, and a clone of this repository (phase 1 has no installer yet). The rules file lives at `.planning/standing-orders/ORDERS.yaml` in *your* project.
+**Before you start:** Node 22 or newer, and a checkout of the Standing Orders repository (the commands below run its router directly). The rules file lives at `.planning/standing-orders/ORDERS.yaml` in *your* project.
 
 ## 1. Write a rules file
 

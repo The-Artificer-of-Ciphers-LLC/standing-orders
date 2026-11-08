@@ -2,14 +2,14 @@
 
 Install Standing Orders into a GSD project, turn it on, and get every phase's plans checked against the rules in `ORDERS.yaml`: the planner sees only the rules that apply to the phase, conflicting rules stop planning, and a phase whose plans do not cite every applicable rule cannot reach execution.
 
-**Before you start:** GSD (gsd-core) 1.19.0 or newer, Node 22 or newer, and a project with a `.planning/` directory. To write the rules themselves, see [How to validate ORDERS.yaml](validate-standing-orders.md) and the [schema reference](../../references/standing-orders.md#orders).
+**Before you start:** GSD (gsd-core) 1.19.0 or newer (below 2.0.0), Node 22 or newer, and a project with a `.planning/` directory. To write the rules themselves, see [How to validate ORDERS.yaml](validate-standing-orders.md) and the [schema reference](../../references/standing-orders.md#orders).
 
 ## 1. Install the capability
 
-From a git tag (recommended):
+Install from the repository. The URL has no `#ref` because released gsd-core 1.19 and 1.20 cannot install one ([open-gsd/gsd-core#5297](https://github.com/open-gsd/gsd-core/issues/5297)); the [v0.7.0 release](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/releases/tag/v0.7.0) is the tagged source.
 
 ```bash
-gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.3.0
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git
 ```
 
 or from a local directory:
