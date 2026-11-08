@@ -15,7 +15,7 @@ const { parseOrders } = require('../lib/orders.cjs');
 const { orderHash } = require('../lib/trace.cjs');
 const { yamlOf } = require('./helpers/fixtures.cjs');
 const { memfs } = require('./helpers/memfs.cjs');
-const { HOST_CLI, FLAGGED, fakeProver } = require('./helpers/prover.cjs');
+const { HOST_CLI, FLAGGED, TREE, fakeProver } = require('./helpers/prover.cjs');
 
 const M = new Proxy({}, { get: (_, key) => require('../lib/mutants.cjs')[key] });
 
@@ -144,7 +144,7 @@ function insertion(before, after, k) {
 describe('router mutants: list', () => {
   // row 35
   it('listMutants', () => {
-    const key = (mutant) => M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant });
+    const key = (mutant) => M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant, code: TREE });
     const cache = M.serializeCache({ [key('mutant one')]: { outcome: 'killed', ts: TS }, [key('an older mutant two')]: { outcome: 'survived', ts: TS } });
     for (const config of [enabled(), disabled(), null]) {
       const { m, prover } = setup({ config, orders: HARDENED, files: { [M1]: 'mutant one', [M2]: 'mutant two', [MUTANTS]: cache } });
@@ -181,7 +181,7 @@ describe('router mutants: list', () => {
   });
 
   it('listHumanOutput', () => {
-    const key = M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant: 'mutant one' });
+    const key = M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant: 'mutant one', code: TREE });
     const { m } = setup({ orders: HARDENED, files: { [M1]: 'mutant one', [MUTANTS]: M.serializeCache({ [key]: { outcome: 'killed', ts: TS } }) } });
     run(m, ['mutants', '--order', 'T-A'], { raw: false });
     assert.ok(m.calls.log[0].includes('standing-orders mutants') && m.calls.log[0].includes('T-A'), m.calls.log[0]);
@@ -278,7 +278,6 @@ describe('router mutants: --add refusals', () => {
       '{}',
       without('order'),
       without('path'),
-      without('content'),
       JSON.stringify({ ...ok, order: 5 }),
       JSON.stringify({ ...ok, order: null }),
       JSON.stringify({ ...ok, path: 5 }),
@@ -629,7 +628,7 @@ describe('router mutants: --add writes', () => {
 });
 
 describe('router mutants: --run', () => {
-  const key = (mutant) => M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant });
+  const key = (mutant) => M.cacheKey({ check_kind: 'node-test', check_rule: null, target: 'check a', clean: 'good', mutant, code: TREE });
   const hardened = (opts = {}) => setup({ orders: HARDENED, files: { [M1]: 'mutant one', [M2]: 'mutant two' }, ...opts });
   const RUN = ['mutants', '--run', '--order', 'T-A'];
   const fixtures = (prover) => prover.calls.map((c) => c.fixture);

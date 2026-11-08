@@ -105,6 +105,7 @@ const M3 = `${DIR}/m3.js`;
 const TS = '2026-11-08T00:00:00.000Z';
 const TS2 = '2026-11-09T00:00:00.000Z';
 const TEXT = { [CHECK]: 'check v1', [BAD]: 'bad v1', [GOOD]: 'clean v1', [M1]: 'mutant one', [M2]: 'mutant two', [M3]: 'mutant three' };
+const CODE = 'a'.repeat(40); // the HEAD tree id the cache key covers (review finding F2)
 const BASE = { id: 'T-A', status: 'green', flagged: false, reason: 'ok', located: true, kind: 'node-test', evidence: [] };
 
 const sha = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
@@ -126,7 +127,7 @@ function project({ mutants = [M1, M2], files = {}, drop = [], dirs = [], links =
 }
 
 function apply(p, extra = {}) {
-  return M.applyMutants({ order: p.order, base: BASE, root: p.m.cwd, io: p.m.deps, entries: {}, useCache: true, ts: TS, ...extra });
+  return M.applyMutants({ order: p.order, base: BASE, root: p.m.cwd, io: p.m.deps, entries: {}, useCache: true, ts: TS, code: CODE, ...extra });
 }
 
 const outcomes = (r) => r.result.mutants.map((x) => [x.path, x.outcome, x.cached]);
@@ -146,6 +147,7 @@ describe('mutants: contract constants and cache key', () => {
       PATH_RESERVED: 'path_reserved',
       MUTANT_IS_CHECK_FILE: 'mutant_is_check_file',
       MUTANT_EXISTS: 'mutant_exists',
+      MUTANT_MISSING: 'mutant_missing',
       CONTENT_INVALID: 'content_invalid',
       MANUAL: 'manual',
     });
@@ -236,7 +238,6 @@ describe('mutants: applyMutants outcomes', () => {
       ['green but flagged', verdict({ status: 'green', flagged: true, reason: 'the check did not go red' })],
       ['red, not flagged (the clean control failed)', verdict({ status: 'red', flagged: false, reason: 'red on the clean fixture' })],
       ['unverified', FLAGGED],
-      ['no flagged key', JSON.stringify({ status: 'green' })],
     ];
     for (const [label, answer] of answers) {
       const p = project({ table: { [M1]: answer } });
@@ -251,6 +252,10 @@ describe('mutants: applyMutants outcomes', () => {
     }
     const both = project({ table: { [M1]: FLAGGED, [M2]: FLAGGED } });
     assert.equal(apply(both).result.reason, `mutant_survived: ${M1}, ${M2}`);
+    // review finding F3: an answer that does not say the check was located is no evidence of a survivor
+    const unlocated = apply(project({ table: { [M1]: JSON.stringify({ status: 'green' }) } }));
+    assert.equal(unlocated.result.reason, `mutant_unverified: ${M1}`);
+    assert.deepEqual(outcomes(unlocated), [[M1, 'error', false], [M2, 'killed', false]]);
   });
 
   // E5

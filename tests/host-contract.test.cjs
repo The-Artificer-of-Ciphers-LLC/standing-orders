@@ -562,7 +562,7 @@ gated('mutantOutcomesAgainstRealHost', () => {
     assert.equal(base.status, 'green', JSON.stringify(base));
     assert.equal(base.flagged, false, JSON.stringify(base));
 
-    const first = applyMutants({ order, base, root, io, entries: {}, useCache: true, ts: '2026-11-08T00:00:00.000Z' });
+    const first = applyMutants({ order, base, root, io, entries: {}, useCache: true, ts: '2026-11-08T00:00:00.000Z', code: 'a'.repeat(40) });
     assert.deepEqual(first.result.mutants.map((x) => [x.path, x.outcome, x.cached]), [
       ['tests/fixtures/mutants/a-caught.txt', 'killed', false],
       ['tests/fixtures/mutants/b-missed.txt', 'survived', false],
@@ -573,7 +573,7 @@ gated('mutantOutcomesAgainstRealHost', () => {
     assert.equal(Object.keys(first.entries).length, 2, 'both definitive answers are remembered');
 
     // the cache answers the second time, so the real prover is not asked again
-    const second = applyMutants({ order, base, root, io: { ...io, execFile: () => { throw new Error('the prover must not be called'); } }, entries: first.entries, useCache: true, ts: '2026-11-09T00:00:00.000Z' });
+    const second = applyMutants({ order, base, root, io: { ...io, execFile: () => { throw new Error('the prover must not be called'); } }, entries: first.entries, useCache: true, ts: '2026-11-09T00:00:00.000Z', code: 'a'.repeat(40) });
     assert.deepEqual(second.result.mutants.map((x) => [x.outcome, x.cached]), [['killed', true], ['survived', true]]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
