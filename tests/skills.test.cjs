@@ -175,11 +175,15 @@ describe('skills: the harden skill', () => {
     assert.ok(text.indexOf('mutants --run') > text.indexOf('mutants --add'), 'the run comes after the adds');
     assert.ok(text.lastIndexOf('mutants --run') > text.lastIndexOf('mutants --add'), 'the skill ends by running them');
 
-    // shell-safe JSON: single quotes around the argument, and every apostrophe inside written as '\'' (as the promote skill does)
-    assert.ok(text.includes("--add '{"), 'the JSON argument is single-quoted');
-    assert.ok(text.includes("'\\''"), 'apostrophes inside the JSON are escaped as \'\\\'\'');
-    assert.ok(skillText(PROMOTE).includes("'\\''"), 'the same convention as the promote skill');
-    for (const code of ['path_invalid', 'path_outside_project', 'path_reserved', 'mutant_is_check_file', 'mutant_exists', 'content_invalid', 'order_not_test', 'manual']) {
+    // shell-safe (security review #7, major 3): code never travels on a command line; only {order, path}
+    // goes in single quotes, the id is restricted to a shell-inert alphabet, and every --order is single-quoted.
+    assert.ok(text.includes("--add '{\"order\":\"<id>\",\"path\":\"<path>\"}'"), 'the add argument is single-quoted {order, path} only');
+    assert.ok(!/--add '[^']*"content"/.test(text), 'no file content on the command line');
+    assert.ok(text.includes('^[A-Za-z0-9._-]+$'), 'the order id is restricted before it reaches a shell');
+    assert.ok(!/--order "/.test(text), 'the order id is never double-quoted (no $ or backtick expansion)');
+    assert.ok(text.includes("--order '<order id>'"), 'the order id is single-quoted');
+    assert.match(text, /file-writing tool/i, 'the mutant is written with a file tool, not the shell');
+    for (const code of ['path_invalid', 'path_outside_project', 'path_reserved', 'mutant_is_check_file', 'mutant_missing', 'content_invalid', 'order_not_test', 'manual']) {
       assert.ok(text.includes(code), `the skill knows the refusal ${code}`);
     }
   });

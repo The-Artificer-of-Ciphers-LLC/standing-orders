@@ -18,15 +18,17 @@ This lists each mutant path, whether the file exists, and its last outcome (`kil
 
 The easy way is to let the agent propose them. Ask it to run the `gsd-standing-orders-harden` skill with the rule id. It reads the rule, its check and its clean fixture, proposes up to three mutants, and asks you about each one, showing the diff and the input on which the mutant behaves differently. Confirm only mutants that really break the rule: a mutant that behaves the same as the clean fixture (an *equivalent* mutant) can never be caught and will flag the rule for nothing. The promotion skill offers this after you promote a `test` rule. In auto mode the skill proposes but adds nothing.
 
-To add one yourself, pass one JSON object:
+To add one yourself, save the mutant file, then register it:
 
 ```bash
-gsd-tools standing-orders mutants --add '{"order":"REFUND-IDEMPOTENT","path":"tests/fixtures/billing/mutants/refund-retry-after-timeout.js","content":"…file content…"}'
+gsd-tools standing-orders mutants --add '{"order":"REFUND-IDEMPOTENT","path":"tests/fixtures/billing/mutants/refund-retry-after-timeout.js"}'
 ```
 
-The command writes the file and adds its path to the rule's `check_mutants` in `ORDERS.yaml`, keeping your comments and layout. It adds one mutant per call. It refuses a path outside the project, under `.planning/`, equal to one of the rule's check files, or already present. If it cannot place the line safely (for example, `check_mutants` written as `[a, b]` on one line), it writes nothing and prints the YAML to paste by hand.
+The command checks the file (inside the project, a regular file, not a link, 1 to 65536 bytes) and adds its path to the rule's `check_mutants` in `ORDERS.yaml`, keeping your comments and layout. It adds one mutant per call. It refuses a path outside the project, under `.planning/`, or equal to one of the rule's check files, and a file that does not exist (`mutant_missing`). If it cannot place the line safely (for example, `check_mutants` written as `[a, b]` on one line), it writes nothing and prints the YAML to paste by hand.
 
-You can also list paths under `check_mutants` in `ORDERS.yaml` directly and create the files yourself.
+For a short mutant you can instead pass its text as `"content"`, and the command writes the file for you (it must not exist yet). Keep long content out of the command line: Windows limits a command to 32,767 characters.
+
+You can also list paths under `check_mutants` in `ORDERS.yaml` directly.
 
 ## 3. Run them
 
@@ -41,7 +43,7 @@ It runs the rule's check through GSD's prover, first on the normal fixtures, the
 | Outcome | Meaning | What to do |
 |---|---|---|
 | `killed` | The check failed on the mutant and passed on the clean fixture. | Nothing. |
-| `survived` | The check passed on the mutant (or failed on the clean fixture). | Decide which is true. **The check is too weak:** strengthen it in its own change, outside an executing phase, since a phase may not edit check files. **The mutant is equivalent:** remove its path from `check_mutants`. |
+| `survived` | The check ran, and passed on the mutant (or failed on the clean fixture). | Decide which is true. **The check is too weak:** strengthen it in its own change, outside an executing phase, since a phase may not edit check files. **The mutant is equivalent:** remove its path from `check_mutants`. |
 | `error` (`mutant_missing`, `mutant_unreadable`, `host_unavailable`, `host_timeout`, `host_failed`) | No answer was obtained, so the rule is flagged rather than passed. | Restore the file, or fix what the reason names, as in [How to resolve a wave blocked by Standing Orders](resolve-standing-orders-enforcement.md). |
 
 A wave blocked by a survivor shows the reason in the phase's `STANDING-ORDERS.md`:
@@ -52,7 +54,7 @@ A wave blocked by a survivor shows the reason in the phase's `STANDING-ORDERS.md
 
 ## Results are cached
 
-Outcomes are stored in `.planning/standing-orders/MUTANTS.json`, keyed by the contents of the check, the clean fixture and the mutant, so a mutant runs again only when one of those changes. A plan may not list this file, or any mutant, in `files_modified`. The cache does not see helper files the check imports. After changing one, or if you doubt the cache, run with `--no-cache`:
+Outcomes are stored in `.planning/standing-orders/MUTANTS.json`, keyed by the contents of the check, the clean fixture and the mutant, and by the current commit. So a mutant runs again after any commit, and the cache only saves repeat runs within one commit (a re-run wave, or `mutants --run` twice). With uncommitted changes outside `.planning/`, or no usable `git`, the cache is skipped and every mutant runs. A plan may not list this file, or any mutant, in `files_modified`. If you doubt the cache, run with `--no-cache`:
 
 ```bash
 gsd-tools standing-orders mutants --run --order REFUND-IDEMPOTENT --no-cache
