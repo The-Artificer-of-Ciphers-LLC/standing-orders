@@ -27,6 +27,21 @@ describe('references/standing-orders.md parity', () => {
     assert.deepEqual(enumFromDoc('check_kind'), [...CHECK_KINDS]);
   });
 
+  it('referenceDocMatchesLoopSurface', () => {
+    const { SUBCOMMANDS } = require('../standing-orders-router.cjs');
+    const { BLOCK_ON_VALUES } = require('../lib/config.cjs');
+    const { STATUS } = require('../lib/gate.cjs');
+    for (const sub of SUBCOMMANDS) {
+      assert.ok(DOC.includes('`standing-orders ' + sub + '`'), `reference doc documents the subcommand ${sub}`);
+    }
+    for (const value of BLOCK_ON_VALUES) {
+      assert.ok(DOC.includes('`' + value + '`'), `reference doc documents block_on value ${value}`);
+    }
+    for (const value of Object.values(STATUS)) {
+      assert.ok(DOC.includes('`' + value + '`'), `reference doc documents verdict status ${value}`);
+    }
+  });
+
   it('referenceDocListsEveryErrorCode', () => {
     for (const code of Object.values(ERROR_CODES)) {
       assert.ok(DOC.includes('`' + code + '`'), `reference doc documents error code ${code}`);
