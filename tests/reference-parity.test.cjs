@@ -80,3 +80,24 @@ describe('references/standing-orders.md phase 5 parity', () => {
     assert.deepEqual(capability.commands[0].subcommands, [...SUBCOMMANDS], 'capability.json subcommands equal the router SUBCOMMANDS');
   });
 });
+
+// Phase 6 (#7), row 57: the reference documents what the mutation-hardening code exposes.
+describe('references/standing-orders.md phase 6 parity', () => {
+  it('referenceDocListsPhase6Surface', () => {
+    const { SUBCOMMANDS } = require('../standing-orders-router.cjs');
+    const { MUTANT_CODES } = require('../lib/mutants.cjs');
+    assert.ok(SUBCOMMANDS.includes('mutants'), 'the router lists mutants');
+    assert.ok(DOC.includes('`standing-orders mutants`'), 'reference doc documents the mutants subcommand');
+    assert.ok(DOC.includes('`check_mutants`'), 'reference doc documents the check_mutants order field');
+    for (const flag of ['--order', '--add', '--run', '--no-cache']) {
+      assert.ok(DOC.includes('`' + flag), `reference doc documents the ${flag} flag`);
+    }
+    for (const code of [...Object.values(MUTANT_CODES), 'no_mutants', 'duplicate_mutant', 'mutant_is_check_file', 'path_invalid', 'mutant_survived', 'mutant_unverified', 'mutant_missing', 'mutant_unreadable']) {
+      assert.ok(DOC.includes('`' + code + '`'), `reference doc documents code ${code}`);
+    }
+    for (const term of ['MUTANTS.json', 'killed', 'survived']) {
+      assert.ok(DOC.includes(term), `reference doc mentions ${term}`);
+    }
+    assert.ok(DOC.includes('standing-orders-harden'), 'reference doc names the harden skill');
+  });
+});

@@ -153,8 +153,8 @@ gated('manifestValidates', () => {
   assert.deepEqual(v.validateCapability(cap, 'standing-orders'), []);
   assert.deepEqual(v.validateAgainstContract(cap, 'standing-orders'), []);
   assert.deepEqual(v.materializeHookFragments(cap, dir), []);
-  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
-  assert.deepEqual(cap.skills, ['standing-orders-promote', 'standing-orders-conflict-review']);
+  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
+  assert.deepEqual(cap.skills, ['standing-orders-promote', 'standing-orders-conflict-review', 'standing-orders-harden']);
   assert.deepEqual(cap.steps.filter((s) => s.point === 'ship:pre'), [
     { point: 'ship:pre', ref: { command: 'standing-orders trace' }, produces: ['.planning/standing-orders/TRACE.jsonl'], consumes: [], when: 'standing-orders.enabled', onError: 'skip' },
   ]);
@@ -487,6 +487,94 @@ gated('enforcementRequestShapeMatchesHost', () => {
     const uncontrolled = go(withoutClean);
     assert.equal(uncontrolled.flagged, true, JSON.stringify(uncontrolled));
     assert.notEqual(uncontrolled.status, 'green');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Row 56 (#7): a mutant is just another violation fixture. The real prover must answer "killed" for a fault the check
+// catches and "survived" for one it does not, through the very request the mutant runner builds (ADR-0002 section 2).
+gated('mutantOutcomesAgainstRealHost', () => {
+  const { runEnforcement } = require('../lib/host.cjs');
+  const { applyMutants } = require('../lib/mutants.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'so-mutants-'));
+  try {
+    const write = (rel, text) => {
+      const p = path.join(root, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    };
+    write('tests/neg.test.cjs', [
+      "'use strict';",
+      "const test = require('node:test');",
+      "const assert = require('node:assert/strict');",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "test('subject carries no violation marker', () => {",
+      '  const subject = process.env.GSD_PROHIB_SUBJECT;',
+      "  const text = subject ? fs.readFileSync(path.resolve(process.cwd(), subject), 'utf8') : '';",
+      "  assert.ok(!text.includes('VIOLATION-MARKER'), 'subject violates the prohibition');",
+      '});',
+      '',
+    ].join('\n'));
+    write('tests/fixtures/bad.txt', 'this subject contains VIOLATION-MARKER\n');
+    write('tests/fixtures/good.txt', 'this subject is clean\n');
+    // a fault the check catches (the marker, in a place the violation fixture does not have it) and one it is blind to
+    write('tests/fixtures/mutants/a-caught.txt', 'this subject is clean, except on retry: VIOLATION-MARKER\n');
+    write('tests/fixtures/mutants/b-missed.txt', 'this subject contains violation-marker in another case\n');
+
+    const io = {
+      execFile: childProcess.execFileSync,
+      readFile: (p) => fs.readFileSync(p, 'utf8'),
+      isFile: (p) => {
+        try {
+          return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      },
+      isSymlink: (p) => {
+        try {
+          return fs.lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+      exists: (p) => fs.existsSync(p),
+      realpath: (p) => fs.realpathSync(p),
+      statSize: (p) => fs.statSync(p).size,
+      nodePath: process.execPath,
+      env: { GSD_TOOLS: CLI },
+      argv: ['node', CLI],
+    };
+    const order = {
+      id: 'NEG-1',
+      kind: 'prohibition',
+      statement: 'A subject never carries the violation marker.',
+      verification: 'test',
+      check_kind: 'node-test',
+      check_target: 'tests/neg.test.cjs',
+      check_violation_fixture: 'tests/fixtures/bad.txt',
+      check_clean_fixture: 'tests/fixtures/good.txt',
+      check_mutants: ['tests/fixtures/mutants/b-missed.txt', 'tests/fixtures/mutants/a-caught.txt'],
+    };
+    const base = runEnforcement({ order, cwd: root, env: io.env, argv: io.argv, deps: io });
+    assert.equal(base.status, 'green', JSON.stringify(base));
+    assert.equal(base.flagged, false, JSON.stringify(base));
+
+    const first = applyMutants({ order, base, root, io, entries: {}, useCache: true, ts: '2026-11-08T00:00:00.000Z' });
+    assert.deepEqual(first.result.mutants.map((x) => [x.path, x.outcome, x.cached]), [
+      ['tests/fixtures/mutants/a-caught.txt', 'killed', false],
+      ['tests/fixtures/mutants/b-missed.txt', 'survived', false],
+    ], JSON.stringify(first.result.mutants));
+    assert.equal(first.result.flagged, true, 'a survivor flags the order');
+    assert.equal(first.result.reason, 'mutant_survived: tests/fixtures/mutants/b-missed.txt');
+    assert.equal(first.result.status, 'green');
+    assert.equal(Object.keys(first.entries).length, 2, 'both definitive answers are remembered');
+
+    // the cache answers the second time, so the real prover is not asked again
+    const second = applyMutants({ order, base, root, io: { ...io, execFile: () => { throw new Error('the prover must not be called'); } }, entries: first.entries, useCache: true, ts: '2026-11-09T00:00:00.000Z' });
+    assert.deepEqual(second.result.mutants.map((x) => [x.outcome, x.cached]), [['killed', true], ['survived', true]]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

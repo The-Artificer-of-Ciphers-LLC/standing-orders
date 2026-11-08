@@ -11,7 +11,7 @@
  * `now` defaults to a fixed Date (2026-11-08T00:00:00.000Z); override it to move the clock.
  *
  * `calls` records, in call order: readFile (path), writeFile (path), appendFile (path), rename
- * ([from, to]), mkdir (path), execFile ({ file, args, opts }), log (message),
+ * ([from, to]), unlink (path), mkdir (path), execFile ({ file, args, opts }), log (message),
  * error (message).
  */
 
@@ -53,7 +53,7 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
     addDirs(path.dirname(abs(rel)));
   }
 
-  const calls = { readFile: [], writeFile: [], appendFile: [], rename: [], mkdir: [], execFile: [], log: [], error: [] };
+  const calls = { readFile: [], writeFile: [], appendFile: [], rename: [], unlink: [], mkdir: [], execFile: [], log: [], error: [] };
   const known = (p) => fileMap.has(p) || dirSet.has(p) || linkMap.has(p);
 
   const deps = {
@@ -98,6 +98,11 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
       if (!fileMap.has(from)) throw enoent(from);
       fileMap.set(to, fileMap.get(from));
       fileMap.delete(from);
+    },
+    unlink: (p) => {
+      calls.unlink.push(p);
+      if (!fileMap.has(p)) throw enoent(p);
+      fileMap.delete(p);
     },
     mkdir: (p) => {
       calls.mkdir.push(p);

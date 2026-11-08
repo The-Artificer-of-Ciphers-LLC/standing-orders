@@ -90,7 +90,7 @@ const noWrites = (m) => {
 
 describe('router trace', () => {
   it('exportsTheTraceConstants', () => {
-    assert.deepEqual([...router.SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
+    assert.deepEqual([...router.SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
     assert.equal(router.TRACE_PATH, '.planning/standing-orders/TRACE.jsonl');
     assert.equal(router.GIT_TIMEOUT_MS, 10000);
     assert.equal(MAX_TRACE_BYTES, 32 * 1024 * 1024);

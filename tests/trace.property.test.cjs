@@ -82,6 +82,33 @@ describe('trace — properties', () => {
     );
   });
 
+  // Phase 6 (#7), row 12: `check_mutants` is a set, like contexts and scope.
+  it('mutantsAreASet', () => {
+    const mutantPath = fc.stringMatching(/^[a-z0-9_.-]{1,6}(\/[a-z0-9_.-]{1,6}){0,2}$/);
+    fc.assert(
+      fc.property(specArb, fc.array(mutantPath, { minLength: 1, maxLength: 5 }), seedArb, fc.nat({ max: 3 }), (s, list, seed, dupes) => {
+        const o = normalized(s);
+        const grown = shuffled([...list, ...list.slice(0, dupes)], seed);
+        assert.equal(orderHash({ ...o, check_mutants: grown }), orderHash({ ...o, check_mutants: list }), 'reordering and repeating mutants is not an edit');
+        assert.equal(orderHash({ ...o, check_mutants: [...new Set(list)].sort() }), orderHash({ ...o, check_mutants: list }));
+      }),
+      { seed: SEED, numRuns: 200 },
+    );
+  });
+
+  it('mutantMembershipChangesHash', () => {
+    const mutantPath = fc.stringMatching(/^[a-z0-9_.-]{1,6}(\/[a-z0-9_.-]{1,6}){0,2}$/);
+    fc.assert(
+      fc.property(specArb, fc.array(mutantPath, { maxLength: 4 }), mutantPath, (s, list, extra) => {
+        fc.pre(!list.includes(extra));
+        const o = normalized(s);
+        assert.notEqual(orderHash({ ...o, check_mutants: [...list, extra] }), orderHash({ ...o, check_mutants: list }), 'a new member is an edit');
+        assert.equal(orderHash({ ...o, check_mutants: [] }), orderHash(o), 'an empty list is the same as none');
+      }),
+      { seed: SEED, numRuns: 200 },
+    );
+  });
+
   it('hashChangesOnEdit', () => {
     const scalarFields = ['id', 'kind', 'statement', 'operation', 'outcome', 'verification', 'check_kind', 'check_target', 'check_rule', 'check_violation_fixture', 'check_clean_fixture', 'source'];
     fc.assert(

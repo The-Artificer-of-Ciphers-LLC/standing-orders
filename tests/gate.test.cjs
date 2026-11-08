@@ -367,6 +367,103 @@ describe('gate evaluateCoverage check-file edit rule', () => {
   });
 });
 
+// Phase 6 (#7), ADR-0002 section 3: mutants and their cache are check files too. Rows 32-34.
+describe('gate evaluateCoverage mutant protection', () => {
+  const MUTANTS_JSON = '.planning/standing-orders/MUTANTS.json';
+  const M1 = 'tests/fixtures/mutants/m1.js';
+  const M2 = 'tests/fixtures/mutants/m2.js';
+  const TM = testOrder({ id: 'T-M', statement: 'Never double refund.', check_target: 'tests/x.test.cjs', check_violation_fixture: 'tests/fixtures/bad.js', check_clean_fixture: 'tests/fixtures/good.js', check_mutants: [M1, M2] });
+  const items = (...orders) => ({ prohibitions: orders.filter((o) => o.verification === 'test').map((o) => projectionOf(o).item), truths: orders.filter((o) => o.verification !== 'test').map((o) => projectionOf(o).item) });
+  const cover = (files, applicable = [TM]) => evaluateCoverage({ applicableIds: applicable.map((o) => o.id), applicable, ordersTotal: applicable.length, plans: [mplan('03-01-PLAN.md', items(...applicable), files)] });
+  const message = (file, id) => `03-01-PLAN.md lists ${file}, a check file of ${id}, in files_modified; checks are fixed before the implementing phase`;
+
+  // row 32
+  it('mutantPathProtected', () => {
+    const r = cover(['src/a.js', M1]);
+    assert.equal(r.status, 'incomplete');
+    assert.deepEqual(r.checkFileEdits, [{ plan: '03-01-PLAN.md', file: M1, id: 'T-M' }]);
+    assert.deepEqual(r.reasons, [{ code: 'check_file_modified', message: message(M1, 'T-M') }], 'the same reason code and wording as every other check file');
+    assert.deepEqual(r.notProjected, []);
+    assert.deepEqual(r.uncited, []);
+
+    const both = cover([M2, M1]);
+    assert.deepEqual(both.checkFileEdits.map((e) => e.file).sort(), [M1, M2]);
+    assert.deepEqual(codesOf(both), ['check_file_modified', 'check_file_modified']);
+
+    for (const spelling of ['tests\\fixtures\\mutants\\m1.js', 'Tests/Fixtures/Mutants/M1.js', 'tests/fixtures/./mutants/m1.js', ' tests/fixtures/mutants/m1.js', 'tests/fixtures/mutants/m1.js/']) {
+      const spelled = cover([spelling]);
+      assert.deepEqual(codesOf(spelled), ['check_file_modified'], spelling);
+      assert.equal(spelled.checkFileEdits[0].file, M1, spelling);
+    }
+    for (const near of ['tests/fixtures/mutants/m1.js.bak', 'tests/fixtures/mutants/m10.js', 'tests/fixtures/mutants', 'xtests/fixtures/mutants/m1.js']) {
+      const clear = cover([near]);
+      assert.equal(clear.status, 'complete', near);
+      assert.deepEqual(clear.checkFileEdits, [], near);
+    }
+    // the mutants of an order that is not applicable here protect nothing
+    const other = cover([M1], [B1]);
+    assert.equal(other.status, 'complete');
+    assert.deepEqual(other.checkFileEdits, []);
+  });
+
+  // row 33
+  it('cacheProtectedOnlyWithMutants', () => {
+    const r = cover([MUTANTS_JSON]);
+    assert.equal(r.status, 'incomplete');
+    assert.ok(codesOf(r).includes('check_file_modified'), JSON.stringify(r.reasons));
+    assert.ok(r.checkFileEdits.some((e) => e.file === MUTANTS_JSON && e.id === 'T-M'), JSON.stringify(r.checkFileEdits));
+    for (const spelling of ['.planning\\standing-orders\\MUTANTS.json', './.planning/standing-orders/MUTANTS.json', '.PLANNING/standing-orders/mutants.json']) {
+      assert.ok(cover([spelling]).checkFileEdits.some((e) => e.file === MUTANTS_JSON), spelling);
+    }
+
+    // negative space: with no mutant anywhere the cache does not exist, so naming it is not a violation
+    const T1plain = testOrder({ id: 'T-1', statement: 'Never double refund.' });
+    const noMutants = cover([MUTANTS_JSON], [T1plain]);
+    assert.equal(noMutants.status, 'complete');
+    assert.deepEqual(noMutants.checkFileEdits, []);
+    const emptyList = cover([MUTANTS_JSON], [testOrder({ id: 'T-2', statement: 'Never double refund.', check_mutants: [] })]);
+    assert.equal(emptyList.status, 'complete');
+    assert.deepEqual(emptyList.checkFileEdits, []);
+    // the order that has mutants is not applicable in this phase
+    const inapplicable = cover([MUTANTS_JSON], [B1]);
+    assert.equal(inapplicable.status, 'complete');
+    // a sibling file is not the cache
+    assert.equal(cover(['.planning/standing-orders/MUTANTS.json.bak', '.planning/standing-orders/ORDERS.yaml']).status, 'complete');
+  });
+
+  // row 34
+  it('mutantProtectionByKind', () => {
+    // C3: a lint-rule target is the code under the rule (editable), but its mutants are check files
+    const lint = testOrder({ id: 'L-1', statement: 'No eval.', check_kind: 'lint-rule', check_target: 'src/billing/refund.js', check_rule: 'local/no-eval', check_mutants: [M1] });
+    const target = cover(['src/billing/refund.js'], [lint]);
+    assert.equal(target.status, 'complete');
+    assert.deepEqual(target.checkFileEdits, []);
+    const mutant = cover([M1], [lint]);
+    assert.equal(mutant.status, 'incomplete');
+    assert.deepEqual(mutant.checkFileEdits, [{ plan: '03-01-PLAN.md', file: M1, id: 'L-1' }]);
+    assert.ok(cover([MUTANTS_JSON], [lint]).checkFileEdits.some((e) => e.file === MUTANTS_JSON));
+
+    // C4: a backstop order that happens to carry (ignored) mutants protects nothing, and its mutants never run
+    const backstop = order({ id: 'B-9', statement: 'S.', check_mutants: [M1] });
+    const edits = cover([M1, MUTANTS_JSON], [backstop]);
+    assert.equal(edits.status, 'complete');
+    assert.deepEqual(edits.checkFileEdits, []);
+
+    // junk in the list is ignored rather than thrown on
+    const junk = testOrder({ id: 'T-J', statement: 'Never double refund.', check_mutants: [null, 5, '', M1] });
+    assert.deepEqual(cover([M1], [junk]).checkFileEdits, [{ plan: '03-01-PLAN.md', file: M1, id: 'T-J' }]);
+    const notAList = testOrder({ id: 'T-K', statement: 'Never double refund.', check_mutants: 'tests/fixtures/mutants/m1.js' });
+    assert.equal(cover([M1], [notAList]).status, 'complete');
+  });
+
+  it('protectedFilesListsMutants', () => {
+    const { protectedFiles } = require('../lib/phase.cjs');
+    assert.deepEqual([...protectedFiles(TM)].sort(), ['tests/fixtures/bad.js', 'tests/fixtures/good.js', 'tests/x.test.cjs', M1, M2, MUTANTS_JSON].sort());
+    assert.deepEqual(protectedFiles(testOrder({ id: 'T-1', statement: 'S.' })).includes(MUTANTS_JSON), false);
+    assert.deepEqual(protectedFiles(order({ id: 'B-9', statement: 'S.', check_mutants: [M1] })), []);
+  });
+});
+
 describe('gate evaluateCoverage projection rule', () => {
   const cover = (plans, applicable = [T1, B1]) => evaluateCoverage({ applicableIds: applicable.map((o) => o.id), applicable, ordersTotal: applicable.length, plans });
 
