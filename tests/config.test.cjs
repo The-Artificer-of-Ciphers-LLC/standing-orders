@@ -56,12 +56,12 @@ describe('config', () => {
     const wsConfig = path.join(CWD, '.planning', 'workstreams', 'ws1', 'config.json');
     const { readFile } = reader({
       [wsConfig]: nested({ block_on: 'never' }),
-      [ROOT_CONFIG]: nested({ enabled: true, block_on: 'conflict_or_missing', max_bytes: 100 }),
+      [ROOT_CONFIG]: nested({ enabled: true, block_on: 'conflict_or_missing', max_bytes: 700 }),
     });
     const cfg = readCapabilityConfig({ cwd: CWD, env: { GSD_WORKSTREAM: 'ws1' }, readFile });
     assert.equal(cfg.blockOn, 'never');
     assert.equal(cfg.enabled, true);
-    assert.equal(cfg.maxBytes, 100);
+    assert.equal(cfg.maxBytes, 700);
     assert.deepEqual(configPaths(CWD, { GSD_WORKSTREAM: 'ws1' }), [wsConfig, ROOT_CONFIG]);
   });
 
@@ -131,18 +131,20 @@ describe('config', () => {
   it('zeroMaxBytesIsValid', () => {
     const { readFile } = reader({ [ROOT_CONFIG]: nested({ max_bytes: 0 }) });
     const cfg = readCapabilityConfig({ cwd: CWD, env: {}, readFile });
-    assert.equal(cfg.maxBytes, 0);
-    assert.deepEqual(cfg.warnings, []);
+    // #15: below the 512 minimum the effective cap is 512, with a warning (was: 0 accepted silently)
+    assert.equal(cfg.maxBytes, 512);
+    assert.deepEqual(cfg.warnings.map((w) => w.code), ['max_bytes_below_minimum']);
   });
 
-  it('enabledFollowsHostCoercion', () => {
+  it('enabledIsOnlyTheBoolean', () => {
     const enabledFor = (value) => {
       const { readFile } = reader({ [ROOT_CONFIG]: JSON.stringify({ 'standing-orders': { enabled: value } }) });
       return readCapabilityConfig({ cwd: CWD, env: {}, readFile }).enabled;
     };
-    assert.equal(enabledFor('false'), true);
+    // #15: was host coercion ('false' and 1 enabled); only the boolean true enables now
+    assert.equal(enabledFor('false'), false);
     assert.equal(enabledFor(true), true);
-    assert.equal(enabledFor(1), true);
+    assert.equal(enabledFor(1), false);
     assert.equal(enabledFor(false), false);
     assert.equal(enabledFor(0), false);
     assert.equal(enabledFor(''), false);

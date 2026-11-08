@@ -67,6 +67,7 @@ const noWrites = (m) => {
   for (const k of ['writeFile', 'appendFile', 'rename', 'mkdir', 'unlink']) assert.deepEqual(m.calls[k], [], k);
 };
 const RUN = ['mutants', '--run', '--order', 'T-A'];
+const COVERAGE = ['coverage', '--phase-dir', PHASE];
 const fixtures = (prover) => prover.calls.map((c) => c.fixture);
 
 describe('F1: --add canonicalises the path before every check', () => {
@@ -146,6 +147,7 @@ describe('F2: the cache is keyed on the HEAD tree', () => {
     assert.equal(Object.keys(JSON.parse(m.read(MUTANTS)).entries).length, 4);
     prover.calls.length = 0;
     tree = 'c'.repeat(40);
+    run(m, COVERAGE); // #15: --run wrote the cache, a protected file; coverage records its state before enforce
     const enforced = run(m, ['enforce', '--phase-dir', PHASE]);
     assert.deepEqual(enforced.results[0].mutants.map((x) => x.cached), [false, false]);
     assert.deepEqual(fixtures(prover), [BAD, M1, M2]);
@@ -171,6 +173,7 @@ describe('F2: the cache is keyed on the HEAD tree', () => {
       assert.deepEqual(fixtures(prover), [BAD, M1, M2], `${label}: every mutant runs again`);
       assert.deepEqual(second.mutants.map((x) => x.cached), [false, false], label);
       prover.calls.length = 0;
+      run(m, COVERAGE);
       const enforced = run(m, ['enforce', '--phase-dir', PHASE]);
       assert.equal(enforced.enforcement, 'clear', `${label}: ${JSON.stringify(enforced.reasons)}`);
       assert.deepEqual(fixtures(prover), [BAD, M1, M2], label);
@@ -191,6 +194,7 @@ describe('F2: the cache is keyed on the HEAD tree', () => {
 
   it('noMutantsNoGitCall', () => {
     const { m, prover } = setup({ phase: true });
+    run(m, COVERAGE);
     run(m, ['enforce', '--phase-dir', PHASE]);
     assert.deepEqual(prover.gitCalls, []);
     const plain = setup();

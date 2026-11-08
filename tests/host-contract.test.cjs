@@ -335,7 +335,11 @@ gated('hostRunsEnforceAndPredicateReadsVerdict', () => {
   assert.equal(lastJson(selected.stdout).enforcement, 'pending', selected.stdout + selected.stderr);
   assert.equal(check().block, true, 'a pending enforcement verdict blocks the wave');
 
-  const enforced = tryRun(['standing-orders', 'enforce', '--phase', '3', '--raw'], cwd, home);
+  // #15: plan:post runs coverage, which records the check files' state; enforce compares against it
+  const covered = tryRun(['standing-orders', 'coverage', '--phase', '3', '--raw'], cwd, home);
+  assert.equal(lastJson(covered.stdout).subcommand, 'coverage', covered.stdout + covered.stderr);
+
+  const enforced =tryRun(['standing-orders', 'enforce', '--phase', '3', '--raw'], cwd, home);
   const report = lastJson(enforced.stdout);
   assert.equal(report.subcommand, 'enforce', enforced.stdout + enforced.stderr);
   assert.equal(report.enforcement, 'clear');

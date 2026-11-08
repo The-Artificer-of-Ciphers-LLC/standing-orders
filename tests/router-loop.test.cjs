@@ -226,7 +226,8 @@ describe('router loop subcommands', () => {
     assert.equal(r1.coverage, 'complete');
     assert.equal(r1.conflicts, 'clear');
     assert.deepEqual(r1.uncited, []);
-    assert.deepEqual(r1.written, [VERDICT]);
+    // #15: coverage also writes its integrity record, first
+    assert.deepEqual(r1.written, [`${PHASE}/STANDING-ORDERS-INTEGRITY.json`, VERDICT]);
     const lines = complete.read(VERDICT).split('\n');
     assert.ok(lines.includes('coverage: complete'));
     assert.ok(lines.includes('conflicts: clear'));
@@ -513,7 +514,16 @@ const PLAN_AB = planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cj
  * `verdicts` maps an order id to the canned host stdout (or an Error to throw).
  * `snapshots` records the verdict file as it stood at each host call.
  */
-function setupEnforce({ orders = ENFORCE_ORDERS, plan = PLAN_AB, verdicts = {}, overrides = {}, config, links, extraFiles = {} } = {}) {
+const INTEGRITY = `${PHASE}/STANDING-ORDERS-INTEGRITY.json`;
+
+/** `setup` options plus the integrity record `coverage` would have written, made in a scratch project (no call log or verdict of the real one is touched). */
+function primed(opts) {
+  const scratch = setup({ ...opts, overrides: {} });
+  run(scratch, 'coverage');
+  return scratch.has(INTEGRITY) ? { ...opts, files: { ...opts.files, [INTEGRITY]: scratch.read(INTEGRITY) } } : opts;
+}
+
+function setupEnforce({ orders = ENFORCE_ORDERS, plan = PLAN_AB, verdicts = {}, overrides = {}, config, links, extraFiles = {}, integrity = true } = {}) {
   const execCalls = [];
   const snapshots = [];
   let m = null;
@@ -530,7 +540,9 @@ function setupEnforce({ orders = ENFORCE_ORDERS, plan = PLAN_AB, verdicts = {}, 
   const opts = { orders, files, overrides: { execFile, argv: ['node', HOST_CLI], ...overrides } };
   if (config !== undefined) opts.config = config;
   if (links !== undefined) opts.links = links;
-  m = setup(opts);
+  // #15: enforce needs the record `coverage` writes at plan:post. Prime it from a scratch project holding the same files,
+  // so this project's own call logs and verdict start untouched.
+  m = setup(integrity ? primed(opts) : opts);
   return { m, execCalls, snapshots };
 }
 
@@ -554,7 +566,8 @@ describe('router enforce subcommand', () => {
   });
 
   it('enforceMissingOrdersClear', () => {
-    const { m, execCalls } = setupEnforce({ orders: null, plan: null });
+    // no ORDERS.yaml and no coverage record: nothing to protect, and the report is exactly what it always was
+    const { m, execCalls } = setupEnforce({ orders: null, plan: null, integrity: false });
     const r = run(m, 'enforce');
     assert.equal(r.ok, true);
     assert.equal(r.enforcement, 'clear');
@@ -658,7 +671,7 @@ describe('router enforce subcommand', () => {
       assert.equal(exitCodeFor(r), 1);
     }
     // no host CLI at all
-    const m = setup({ orders: doc({ orders: [T_A] }), files: { [PLAN]: planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] }) } });
+    const m = setup(primed({ orders: doc({ orders: [T_A] }), files: { [PLAN]: planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] }) } }));
     const r = run(m, 'enforce');
     assert.equal(r.enforcement, 'flagged');
     assert.ok(r.results[0].reason.startsWith('host_unavailable'), r.results[0].reason);
@@ -1073,7 +1086,7 @@ describe('router enforce: mutants', () => {
     for (const rel of drop) delete all[rel];
     const opts = { orders, files: all, overrides: { execFile: prover.execFile, argv: ['node', HOST_CLI], ...overrides } };
     if (config !== undefined) opts.config = config;
-    return { m: setup(opts), prover };
+    return { m: setup(primed(opts)), prover };
   }
   const report = (m) => JSON.parse(m.read(ENFORCEMENT_PATH));
   const cacheOutcomes = (m) => Object.values(JSON.parse(m.read(MUTANTS)).entries).map((e) => e.outcome).sort();
@@ -1083,7 +1096,7 @@ describe('router enforce: mutants', () => {
   const unchangedFor = (ordersList) => () => {
     for (const orders of ordersList) {
       const prover = fakeProver();
-      const m = setup({ orders, files: { [HOST_CLI]: '// host stub\n', [PLAN]: PLAN_AB }, overrides: { execFile: prover.execFile, argv: ['node', HOST_CLI] } });
+      const m = setup(primed({ orders, files: { [HOST_CLI]: '// host stub\n', [PLAN]: PLAN_AB }, overrides: { execFile: prover.execFile, argv: ['node', HOST_CLI] } }));
       const r = run(m, 'enforce');
       assert.equal(r.enforcement, 'clear');
       assert.equal(prover.calls.length, 2, 'one prover call per order, none for mutants');
@@ -1091,8 +1104,15 @@ describe('router enforce: mutants', () => {
       assert.ok(!m.calls.readFile.some((p) => p.endsWith('MUTANTS.json')), 'and none is read');
       assert.ok(!r.written.includes(MUTANTS));
       const entry = (id) => ({ id, status: 'green', flagged: false, reason: 'ok', located: true, kind: 'node-test', evidence: [] });
-      assert.deepEqual(report(m), { schema: 1, phase: PHASE, status: 'clear', results: [entry('T-A'), entry('T-B')] }, 'ENFORCEMENT.json is exactly what phase 5 wrote');
-      assert.deepEqual(r.results, [entry('T-A'), entry('T-B')]);
+      // #15 adds two additive keys: results[].order_hash and integrity; everything else is exactly what phase 5 wrote
+      const strip = (rs) => rs.map(({ order_hash: hash, ...rest }) => {
+        assert.match(hash, /^sha256:[0-9a-f]{64}$/);
+        return rest;
+      });
+      const { integrity, ...rest } = report(m);
+      assert.ok(integrity && typeof integrity.files === 'object');
+      assert.deepEqual({ ...rest, results: strip(rest.results) }, { schema: 1, phase: PHASE, status: 'clear', results: [entry('T-A'), entry('T-B')] });
+      assert.deepEqual(strip(r.results), [entry('T-A'), entry('T-B')]);
     }
   };
   it('enforceWithoutMutantsUnchanged', unchangedFor([ENFORCE_ORDERS]));
@@ -1198,6 +1218,7 @@ describe('router enforce: mutants', () => {
     const { m, prover } = setupMutants();
     run(m, 'enforce');
     m.deps.writeFile(abs(m, MA1), 'mutant one, edited');
+    run(m, 'coverage'); // #15: an edit made after coverage is flagged unrun; the planner records the new state first
     prover.calls.length = 0;
     run(m, 'enforce');
     assert.deepEqual(fixturesOf(prover), [BAD, MA1], 'only the edited mutant runs again');
@@ -1205,6 +1226,7 @@ describe('router enforce: mutants', () => {
 
     prover.calls.length = 0;
     m.deps.writeFile(abs(m, CHECK_A), 'check a, edited');
+    run(m, 'coverage');
     run(m, 'enforce');
     assert.deepEqual(fixturesOf(prover), [BAD, MA1, MA2], 'a changed check re-runs every mutant');
   });
