@@ -105,7 +105,7 @@ describe('host', () => {
   it('rejectsBadPhaseToken', () => {
     for (const phase of ['1;rm', '', 'x'.repeat(200), ' 3', '-3', '3 4', '$(id)', 5, undefined, null]) {
       const h = harness();
-      const r = run(h, phase);
+      const r = resolvePhase({ phase, cwd: CWD, env: h.env, argv: h.argv, deps: h.deps });
       assert.equal(r.ok, false, JSON.stringify(phase));
       assert.equal(r.code, 'usage', JSON.stringify(phase));
       assert.equal(h.execCalls.length, 0, JSON.stringify(phase));
