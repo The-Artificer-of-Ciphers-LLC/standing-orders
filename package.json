@@ -1,0 +1,32 @@
+{
+  "name": "standing-orders",
+  "version": "0.1.0",
+  "description": "GSD third-party capability: project-wide, context-scoped business rules with conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "standing-orders-router.cjs",
+  "files": [
+    "capability.json",
+    "standing-orders-router.cjs",
+    "lib/",
+    "fragments/",
+    "references/",
+    "skills/"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=30000 tests/*.test.cjs",
+    "vendor:check": "node scripts/check-vendored.cjs",
+    "lint": "node scripts/check-vendored.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "fast-check": "^4.10.2",
+    "js-yaml": "4.3.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git"
+  }
+}

@@ -1,0 +1,9 @@
+.memdb/
+.memtrace/
+.claude/
+.gsd/
+.planning/
+node_modules/
+coverage/
+.DS_Store
+*.log
