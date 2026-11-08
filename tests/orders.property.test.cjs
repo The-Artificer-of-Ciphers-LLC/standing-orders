@@ -59,7 +59,7 @@ describe('parseOrders — properties', () => {
 
   it('prop_parseOrdersNeverThrows', () => {
     fc.assert(
-      fc.property(fc.oneof(fc.string(), fc.fullUnicodeString(), fc.string({ unit: 'binary' })), (text) => {
+      fc.property(fc.oneof(fc.string(), fc.string({ unit: 'grapheme' }), fc.string({ unit: 'binary' })), (text) => {
         const r = parseOrders(text);
         assert.equal(typeof r.ok, 'boolean');
         assert.ok(Array.isArray(r.errors));

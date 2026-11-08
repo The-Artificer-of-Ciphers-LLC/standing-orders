@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fc = require('fast-check');
 
 const { parseOrders } = require('../lib/orders.cjs');
-const { globToRegExp, selectApplicable, renderApplicable } = require('../lib/select.cjs');
+const { globToRegExp, normalizePath, selectApplicable, renderApplicable } = require('../lib/select.cjs');
 const { doc, order } = require('./helpers/fixtures.cjs');
 
 const SEED = 20261107;
@@ -44,10 +44,18 @@ describe('select — properties', () => {
       fc.property(fc.oneof(glob, fc.string()), filePath, (g, p) => {
         const re = globToRegExp(g);
         assert.ok(re instanceof RegExp);
+        // The compiler reasons over the normalised glob (`./` stripped, slashes collapsed), so the
+        // structural claims below must too.
+        g = normalizePath(g);
         if (re.test(p)) {
-          // A glob that begins with `**` legitimately admits any prefix; every other glob is start-anchored.
-          if (!g.startsWith('**')) assert.equal(re.test('zz/' + p), false, 'anchored at start');
-          assert.equal(re.test(p + '/zz'), g.endsWith('**'), 'anchored at end unless ** tail');
+          // Start: a glob that begins with a wildcard may admit a different first segment (`*/**`
+          // matches every path); every other glob is start-anchored. A `**/` prefix admits any prefix.
+          if (!g.startsWith('*')) assert.equal(re.test('zz/' + p), false, 'anchored at start');
+          if (g.startsWith('**/')) assert.equal(re.test('zz/' + p), true, '**/ admits any prefix');
+          // End: without `**` the segment count is fixed, so an extra segment never matches; a `**`
+          // tail always admits one. A `**` elsewhere (`**/*`) may absorb the growth, so no claim there.
+          if (!g.includes('**')) assert.equal(re.test(p + '/zz'), false, 'anchored at end without **');
+          if (g.endsWith('**')) assert.equal(re.test(p + '/zz'), true, '** tail admits any suffix');
         }
       }),
       { seed: SEED, numRuns: 300 },

@@ -27,7 +27,11 @@ describe('globToRegExp', () => {
     const re = globToRegExp('src/*/a.js');
     assert.equal(re.test('src/x/a.js'), true);
     assert.equal(re.test('src/x/y/a.js'), false);
-    assert.equal(re.test('src//a.js'), false);
+    // A doubled slash is a path-normalisation matter, handled where paths enter (matchesScope),
+    // not a glob matter: `src//a.js` collapses to `src/a.js`, which has too few segments.
+    const d = parsed({ orders: [order({ id: 'A', scope: { paths: ['src/*/a.js'] } })] });
+    assert.equal(matchesScope(d.orders[0], { files: ['src//a.js'], requirements: [] }), false);
+    assert.equal(matchesScope(d.orders[0], { files: ['src//x//a.js'], requirements: [] }), true);
   });
 
   it('globQuestionMatchesExactlyOneNonSlashChar', () => {
@@ -74,7 +78,12 @@ describe('matchesScope / selectApplicable', () => {
     const d = r.document;
     const other = { ...d, orders: [...d.orders, { ...d.orders[2], id: 'SHIPPING-X', scope: { paths: ['src/shipping/**'], requirements: [] } }] };
     const sel = selectApplicable(other, { files: ['src/billing/refund.js'], requirements: [] });
-    assert.deepEqual(sel.map((o) => o.id), ['REFUND-IDEMPOTENT']);
+    // The ADR's two variants declare no scope, so they are global and always apply (Q2);
+    // the billing path selects REFUND-IDEMPOTENT and excludes the shipping-scoped order.
+    assert.deepEqual(sel.map((o) => o.id), ['REFUND-AMOUNT-A', 'REFUND-IDEMPOTENT', 'REFUND-AMOUNT-B']);
+    // SHIPPING-X is backstop tier (cloned from REFUND-AMOUNT-B), so it sorts among the backstops by id.
+    const none = selectApplicable(other, { files: ['src/shipping/label.js'], requirements: [] });
+    assert.deepEqual(none.map((o) => o.id), ['REFUND-AMOUNT-A', 'REFUND-AMOUNT-B', 'SHIPPING-X']);
   });
 
   it('selectsByRequirementId', () => {
