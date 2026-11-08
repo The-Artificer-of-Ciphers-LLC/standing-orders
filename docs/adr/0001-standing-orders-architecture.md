@@ -340,15 +340,17 @@ Decision, confirmed by the maintainer on 2026-11-08:
   - an existing path whose real location is a protected file.
 - **Integrity record.** Before writing the verdict, `coverage` writes `<phase dir>/STANDING-ORDERS-INTEGRITY.json`. It records the `sha256` of every protected file (or `null` when the file is absent) and of each graded plan. `select` resets it. Before running any check, `enforce` re-hashes the protected files:
   - Any difference flags every applicable `test` order with `check_file_changed: <paths>`, and no check is run, so an edited check is never executed. This includes a deleted or newly created `ORDERS.yaml`.
-  - A missing, unreadable or wrong-phase record is `integrity_missing`, which is flagged.
+  - A missing, unreadable or wrong-phase record is `integrity_missing`, which is flagged. This holds even when `ORDERS.yaml` is missing too, because `coverage` always writes a record when the capability is enabled.
+  - A protected file larger than the hash bound (1 MiB) is never treated as unchanged. `coverage` reports it `check_file_too_large`.
   - A changed plan only adds the warning `plan_changed`, because executors legitimately touch plans.
-- **Trace binding.** Each enforcement result carries its order's `order_hash`, and `ENFORCEMENT.json` carries the hashes enforce verified. `trace` records `proven` only when both still match. Otherwise the order is `unenforced` (a different order hash) or `flagged` (a check file changed).
+- **No re-baselining from inside a phase.** `coverage` refuses to replace an existing record whose protected-file hashes differ from the files on disk. It reports `check_file_changed` and keeps the old record. Only `select`, the start of planning, resets the record (confirmed by the maintainer on 2026-11-08, after the phase-7 review showed that an executor could edit a check and then re-run `coverage`).
+- **Trace binding.** Each enforcement result carries its order's `order_hash`, and `ENFORCEMENT.json` carries the hashes enforce verified. `trace` records `proven` only when both are present and still match. Otherwise the order is `unenforced` (a missing or different order hash, or no recorded hashes) or `flagged` (a check file changed).
 - **Smaller corrections from the same review:**
   - Only a JSON `true` enables the capability; the string `"false"` used to enable it.
-  - Conflict detection compares `operation` names after NFC normalization, trimming and lower-casing.
+  - Conflict detection compares `operation` names after NFKC normalization, with zero-width characters removed, then trimmed and lower-cased.
   - `max_bytes` has a floor of 512 bytes, and the header and footer count against the cap.
 
-Known limit, stated: the integrity record is a project file. An executor that deliberately rewrites both a check and the record defeats it, which is the same trust boundary §6 accepts for the check files themselves. It closes the silent and unlisted edits and the deleted-`ORDERS.yaml` hole. Acceptance criterion 4 (`backstop` yields `insufficient_spec`) depends on gsd-verifier's grading prose (A6), which no test in this repository can run. It is stated here next to [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984).
+Known limit, stated: the integrity record is a project file. An executor that deliberately rewrites both a check and the record, or re-plans the phase from `select`, defeats it. That is the same trust boundary §6 accepts for the check files themselves. It closes the silent and unlisted edits and the deleted-`ORDERS.yaml` hole. Acceptance criterion 4 (`backstop` yields `insufficient_spec`) depends on gsd-verifier's grading prose (A6), which no test in this repository can run. It is stated here next to [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984).
 
 ## Alternatives considered
 
