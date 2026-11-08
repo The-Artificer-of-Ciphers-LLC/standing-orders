@@ -566,8 +566,9 @@ describe('router enforce subcommand', () => {
   });
 
   it('enforceMissingOrdersClear', () => {
-    // no ORDERS.yaml and no coverage record: nothing to protect, and the report is exactly what it always was
+    // no ORDERS.yaml: coverage records that (orders.sha256 null) and then enforce is clear (F1: without that record it is flagged)
     const { m, execCalls } = setupEnforce({ orders: null, plan: null, integrity: false });
+    assert.equal(run(m, 'coverage').coverage, 'complete');
     const r = run(m, 'enforce');
     assert.equal(r.ok, true);
     assert.equal(r.enforcement, 'clear');
@@ -576,7 +577,7 @@ describe('router enforce subcommand', () => {
     assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
     assert.ok(lineSet(m, VERDICT).has('generated_by: enforce'));
     const report = JSON.parse(m.read(ENFORCEMENT_PATH));
-    assert.deepEqual(report, { schema: 1, phase: PHASE, status: 'clear', results: [] });
+    assert.deepEqual(report, { schema: 1, phase: PHASE, status: 'clear', integrity: { files: {} }, results: [] });
     assert.equal(exitCodeFor(r), 0);
   });
 
@@ -1218,7 +1219,8 @@ describe('router enforce: mutants', () => {
     const { m, prover } = setupMutants();
     run(m, 'enforce');
     m.deps.writeFile(abs(m, MA1), 'mutant one, edited');
-    run(m, 'coverage'); // #15: an edit made after coverage is flagged unrun; the planner records the new state first
+    run(m, 'select'); // #15 F3: coverage will not re-baseline a changed check file; only select resets the record
+    run(m, 'coverage');
     prover.calls.length = 0;
     run(m, 'enforce');
     assert.deepEqual(fixturesOf(prover), [BAD, MA1], 'only the edited mutant runs again');
@@ -1226,6 +1228,7 @@ describe('router enforce: mutants', () => {
 
     prover.calls.length = 0;
     m.deps.writeFile(abs(m, CHECK_A), 'check a, edited');
+    run(m, 'select');
     run(m, 'coverage');
     run(m, 'enforce');
     assert.deepEqual(fixturesOf(prover), [BAD, MA1, MA2], 'a changed check re-runs every mutant');

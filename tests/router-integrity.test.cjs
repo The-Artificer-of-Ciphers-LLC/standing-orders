@@ -408,8 +408,11 @@ describe('trace: a check file changed since enforce', () => {
 describe('router unchanged where no check file is touched', () => {
   it('orderlessProjectsStayClear', () => {
     const m = setupI({ orders: null, plan: null });
+    // F1: coverage records the orderless state first; without that record enforce is flagged
+    assert.equal(run(m, 'coverage').coverage, 'complete');
+    const before = m.read(INTEGRITY);
     const r = run(m, 'enforce');
     assert.equal(r.enforcement, 'clear');
-    assert.equal(m.has(INTEGRITY), false, 'enforce never writes the coverage record');
+    assert.equal(m.read(INTEGRITY), before, 'enforce leaves the coverage record as it was');
   });
 });

@@ -361,6 +361,20 @@ function buildIntegrityRecord({ ev, root, io }) {
   return { schema: REPORT_SCHEMA, phase: ev.phaseRel, orders: { path: ORDERS_PATH, sha256: hashProjectFile(root, ORDERS_PATH, io) }, files, plans };
 }
 
+/** A recorded or current hash that stands for a file that could not be hashed never equals anything. */
+const isUnreadable = (h) => typeof h === 'string' && h.startsWith('unreadable:');
+const hashDiffers = (now, recorded) => isUnreadable(now) || isUnreadable(recorded) || now !== recorded;
+
+/** The protected paths (ORDERS.yaml included) whose current hash differs from `rec`. */
+function changedFromRecord(rec, root, io) {
+  const changed = [];
+  if (hashDiffers(hashProjectFile(root, ORDERS_PATH, io), rec.orders.sha256)) changed.push(ORDERS_PATH);
+  for (const f of Object.keys(rec.files).sort(compareStrings)) {
+    if (hashDiffers(hashProjectFile(root, f, io), rec.files[f])) changed.push(f);
+  }
+  return changed;
+}
+
 const isHashOrNull = (v) => v === null || typeof v === 'string';
 const allValues = (obj, test) => Object.keys(obj).every((k) => test(obj[k]));
 
@@ -393,22 +407,18 @@ function readIntegrityRecord({ phaseRel, root, io }) {
 }
 
 /**
- * Compare the coverage-time record with the disk. { applies: false } when there is nothing to protect (no
- * ORDERS.yaml and no record); otherwise `flagged` with a reason, or clear with `files` (the verified hashes).
+ * Compare the coverage-time record with the disk. No usable record is always `integrity_missing` (a project
+ * with no ORDERS.yaml runs coverage first, which records `orders.sha256: null`); otherwise `flagged` with a
+ * reason, or clear with `files` (the verified hashes).
  */
 function checkIntegrity({ ev, root, io }) {
   const read = readIntegrityRecord({ phaseRel: ev.phaseRel, root, io });
   if (read.record === undefined) {
-    if (read.missing === true && ev.loadedOrders.orders.state === 'missing') return { applies: false, flagged: false };
     const why = read.invalid !== undefined ? read.invalid : `${integrityRel(ev.phaseRel)} does not exist`;
     return { applies: true, flagged: true, code: 'integrity_missing', detail: `no usable integrity record (${why}); run standing-orders coverage` };
   }
   const rec = read.record;
-  const changed = [];
-  if (hashProjectFile(root, ORDERS_PATH, io) !== rec.orders.sha256) changed.push(ORDERS_PATH);
-  for (const f of Object.keys(rec.files).sort(compareStrings)) {
-    if (hashProjectFile(root, f, io) !== rec.files[f]) changed.push(f);
-  }
+  const changed = changedFromRecord(rec, root, io);
   const plansNow = ev.inputs.plans.map((p) => p.file);
   const planChanged = unique([...Object.keys(rec.plans), ...plansNow]).filter((p) => hashProjectFile(root, `${ev.phaseRel}/${p}`, io) !== (Object.prototype.hasOwnProperty.call(rec.plans, p) ? rec.plans[p] : undefined)).sort(compareStrings);
   if (planChanged.length > 0) {
@@ -423,7 +433,7 @@ function changedSinceEnforce({ enforcement, root, io }) {
   const out = new Set();
   const files = isPlainObject(enforcement) && isPlainObject(enforcement.integrity) && isPlainObject(enforcement.integrity.files) ? enforcement.integrity.files : {};
   for (const f of Object.keys(files)) {
-    if (hashProjectFile(root, f, io) !== files[f]) out.add(canonicalPath(f));
+    if (hashDiffers(hashProjectFile(root, f, io), files[f])) out.add(canonicalPath(f));
   }
   return out;
 }
@@ -615,7 +625,20 @@ function writeSelectOutputs({ ev, config, put, root, io }) {
 
 /** `coverage` records what the gate looked at BEFORE it writes the verdict, so no verdict ever stands without its record. */
 function writeCoverageOutputs({ ev, root, io, put }) {
-  put(integrityRel(ev.phaseRel), JSON.stringify(buildIntegrityRecord({ ev, root, io }), null, 2) + '\n');
+  const fresh = buildIntegrityRecord({ ev, root, io });
+  const tooLarge = Object.keys(fresh.files).sort(compareStrings).filter((f) => fresh.files[f] === 'unreadable:too_large');
+  const reasons = tooLarge.map((f) => ({ code: 'check_file_too_large', message: `check_file_too_large: ${f}` }));
+  // An existing record is the baseline of the phase: coverage never re-baselines check files that changed since it was
+  // written (only `select` resets it), so an edit cannot be laundered by running coverage again.
+  const old = readIntegrityRecord({ phaseRel: ev.phaseRel, root, io });
+  const changed = old.record === undefined ? [] : changedFromRecord(old.record, root, io);
+  if (changed.length > 0) reasons.push({ code: 'check_file_changed', message: `check_file_changed: ${changed.join(', ')}` });
+  else put(integrityRel(ev.phaseRel), JSON.stringify(fresh, null, 2) + '\n');
+  if (reasons.length > 0) {
+    ev.reasons = [...ev.reasons, ...reasons];
+    ev.coverageStatus = STATUS.INCOMPLETE;
+    if (ev.cov) ev.cov = { ...ev.cov, status: STATUS.INCOMPLETE, reasons: [...ev.cov.reasons, ...reasons] };
+  }
   put(ev.verdictRel, verdictText(ev, ev.cov.status, 'coverage'));
 }
 

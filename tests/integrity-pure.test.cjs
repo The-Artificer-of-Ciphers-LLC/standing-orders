@@ -18,15 +18,15 @@ const PHASE = '.planning/phases/03-billing';
 describe('trace binds a proof to the order it proved', () => {
   const document = parsed({ orders: [testOrder({ id: 'T-1', statement: 'Never A.' })] });
   const o = document.orders[0];
-  const enforcement = (extra) => ({ schema: 1, phase: PHASE, status: 'clear', results: [{ id: 'T-1', status: 'green', flagged: false, ...extra }] });
+  const enforcement = (extra) => ({ schema: 1, phase: PHASE, status: 'clear', integrity: { files: {} }, results: [{ id: 'T-1', status: 'green', flagged: false, ...extra }] });
 
   // matrix row 18
   it('staleOrderHashIsUnenforced', () => {
     assert.equal(dispositionFor(o, enforcement({ order_hash: orderHash(o) }), PHASE), 'proven');
     assert.equal(dispositionFor(o, enforcement({ order_hash: 'sha256:' + '0'.repeat(64) }), PHASE), 'unenforced');
     assert.equal(dispositionFor(o, enforcement({ order_hash: 5 }), PHASE), 'unenforced');
-    // a report written before the hash existed keeps its meaning (additive key)
-    assert.equal(dispositionFor(o, enforcement({}), PHASE), 'proven');
+    // a report without the hash proves nothing (F2: no legacy meaning)
+    assert.equal(dispositionFor(o, enforcement({}), PHASE), 'unenforced');
     const edited = { ...o, statement: 'Never A, except on Tuesdays.' };
     const records = buildRecords({ applicable: [edited], document, phaseRel: PHASE, plans: [], files: [], enforcement: enforcement({ order_hash: orderHash(o) }), commitSha: null, ts: 't' });
     assert.equal(records[0].disposition, 'unenforced');
