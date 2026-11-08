@@ -8,7 +8,7 @@ After every execution wave, Standing Orders runs the check of each `test` rule t
 
 This page tells you how to find out which rule, why, and what to do.
 
-**Before you start:** Standing Orders 0.3.0 or newer, installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md).
+**Before you start:** Standing Orders installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md).
 
 ## 1. See which rules were not proven
 
@@ -36,7 +36,7 @@ A rule is proven only when its check fails on the rule's violation fixture, pass
 | the same reason with `located: false` | The rule's check is not well formed (no `check_target`, or a `lint-rule` with no `check_rule`). | Fix the rule in `ORDERS.yaml`; `gsd-tools standing-orders validate` lists what is missing. |
 | `host_unavailable` | Standing Orders could not find `gsd-tools` to call. | Run through GSD (`gsd-tools standing-orders enforce …`), or set `GSD_TOOLS` to the path of `gsd-tools.cjs`. |
 | `host_timeout` | No verdict within 180 s. | Make the check faster, or split it. A check that hangs is never counted as passing. |
-| `host_failed` | `gsd-tools` exited with an error; the message carries its first stderr line. | Fix what that line names (often an old gsd-core: Standing Orders needs 1.19.0 or newer). |
+| `host_failed` | `gsd-tools` exited with an error; the message carries its first stderr line. | Fix what that line names (often an old gsd-core: Standing Orders needs gsd-core 1.19.0 or newer, below 2.0.0). |
 | `host_output_invalid` | `gsd-tools` answered with something that is not a verdict. | Run the `check prohibition-enforcement` command below and read its output. |
 | `check_file_changed: <paths>` | A check file, fixture, mutant or `ORDERS.yaml` changed after planning (`coverage` recorded its hash in `STANDING-ORDERS-INTEGRITY.json`). No check was run, so an edited check is never trusted. | If the change was unintended, restore the file (`git checkout -- <path>`). If it was intended, it belongs in its own change outside the executing phase: revert it here, make it separately, then re-plan the phase (`select`, then `coverage`) so the new hashes are recorded. Re-running `coverage` alone will not accept a changed check file. |
 | `integrity_missing` | The phase has no usable integrity record (planned before Standing Orders 0.7.0, or the file is missing or damaged). | Re-run `gsd-tools standing-orders coverage --phase N`, then the wave. |

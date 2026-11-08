@@ -4,7 +4,7 @@ A `test` rule is proven when its check fails on one violation fixture and passes
 
 Mutants are optional. A `test` rule without any is enforced exactly as before; `validate` only warns `no_mutants`.
 
-**Before you start:** Standing Orders 0.6.0 or newer, installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md), and a `test` rule with a check and both fixtures.
+**Before you start:** Standing Orders installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md), and a `test` rule with a check and both fixtures.
 
 ## 1. See the rule's mutants
 

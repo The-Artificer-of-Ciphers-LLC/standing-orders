@@ -2,7 +2,7 @@
 
 Every time you ship a phase, Standing Orders records which rules that phase was held to, in `.planning/standing-orders/TRACE.jsonl`. When you later edit or remove a rule in `ORDERS.yaml`, two commands read that record: `impact` lists every phase that shipped against one rule and whether the rule has changed since, and `stale` lists every rule that has changed since it was last shipped against.
 
-**Before you start:** Standing Orders 0.4.0 or newer, installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md). The record only exists for phases shipped with `/gsd:ship` after you upgraded.
+**Before you start:** Standing Orders installed and enabled as in [How to gate GSD planning on your standing orders](gate-planning-on-standing-orders.md). The record only exists for phases shipped with `/gsd:ship` after you upgraded.
 
 ## 1. Ship as usual
 
