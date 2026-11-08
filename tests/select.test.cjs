@@ -307,3 +307,76 @@ describe('renderApplicable projection line', () => {
     assert.equal(projectionLines, r.included.length, 'a block is never cut between its Check and Project as lines');
   });
 });
+
+describe('renderApplicable stale line', () => {
+  const one = parsed({ orders: [order({ id: 'ONLY', statement: 'Exactly one order.' })] }).orders;
+  const two = parsed({ orders: [order({ id: 'FIRST', statement: 'First.' }), order({ id: 'SECOND', statement: 'Second.' })] }).orders;
+  const LAST = '.planning/phases/02-old';
+  const stale = { ONLY: { reason: 'changed', last_phase: LAST } };
+  const LINE = `- Stale: changed since last traced in ${LAST}; re-check this order before planning`;
+  const bytes = (text) => Buffer.byteLength(text, 'utf8');
+
+  it('staleLineSitsAfterSourceInsideTheBlock', () => {
+    const r = renderApplicable(one, { maxBytes: 100000, stale });
+    const lines = r.text.split('\n');
+    const at = lines.indexOf(LINE);
+    assert.ok(at > 0, r.text);
+    assert.ok(lines[at - 1].startsWith('- Source:'), lines[at - 1]);
+    assert.equal(lines.filter((l) => l.startsWith('- Stale:')).length, 1);
+    assert.deepEqual(r.included, ['ONLY']);
+  });
+
+  it('absentOrEmptyStaleIsByteIdentical', () => {
+    const plain = renderApplicable(two, { maxBytes: 100000, phase: '3' });
+    for (const s of [undefined, null, {}, { OTHER: { reason: 'changed', last_phase: LAST } }]) {
+      const r = renderApplicable(two, { maxBytes: 100000, phase: '3', stale: s });
+      assert.equal(r.text, plain.text, JSON.stringify(s));
+      assert.equal(r.bytes, plain.bytes);
+    }
+    assert.ok(!plain.text.includes('Stale:'));
+  });
+
+  it('onlyTheStaleBlockChanges', () => {
+    const plain = renderApplicable(two, { maxBytes: 100000 });
+    const r = renderApplicable(two, { maxBytes: 100000, stale: { SECOND: { reason: 'removed', last_phase: LAST } } });
+    const firstOf = (t) => t.slice(t.indexOf('## FIRST'), t.indexOf('## SECOND'));
+    assert.equal(firstOf(r.text), firstOf(plain.text));
+    assert.ok(r.text.includes(`- Stale: removed since last traced in ${LAST}; re-check this order before planning`));
+    assert.equal(r.bytes, plain.bytes + bytes(`- Stale: removed since last traced in ${LAST}; re-check this order before planning\n`));
+  });
+
+  // Row 36: the Stale line is part of the block, so the byte cap accounts for it.
+  it('staleLineCountsTowardCap', () => {
+    const plain = renderApplicable(one, { maxBytes: 100000 });
+    const full = renderApplicable(one, { maxBytes: 100000, stale });
+    assert.equal(full.bytes, plain.bytes + bytes(LINE + '\n'), 'the line adds exactly its own bytes');
+    const limit = full.bytes;
+
+    const at = renderApplicable(one, { maxBytes: limit, stale });
+    assert.deepEqual(at.included, ['ONLY']);
+    assert.equal(at.bytes, limit);
+
+    const short = renderApplicable(one, { maxBytes: limit - 1, stale });
+    assert.deepEqual(short.included, []);
+    assert.deepEqual(short.omitted, ['ONLY']);
+    assert.ok(short.bytes <= limit - 1);
+    assert.equal(short.text.includes('Stale:'), false, 'a block is never cut');
+
+    const spare = renderApplicable(one, { maxBytes: limit + 1, stale });
+    assert.deepEqual(spare.included, ['ONLY']);
+    assert.equal(spare.bytes, limit);
+
+    // the cap that fit the block without the line no longer fits it with the line
+    const withoutLine = renderApplicable(one, { maxBytes: plain.bytes, stale });
+    assert.deepEqual(withoutLine.omitted, ['ONLY']);
+    assert.deepEqual(renderApplicable(one, { maxBytes: plain.bytes }).included, ['ONLY']);
+  });
+
+  it('staleLineStaysOnOneLine', () => {
+    const hostile = { ONLY: { reason: 'changed', last_phase: 'x\n## FAKE\r\ny' } };
+    const r = renderApplicable(one, { maxBytes: 100000, stale: hostile });
+    const lines = r.text.split('\n');
+    assert.equal(lines.filter((l) => l.startsWith('## ')).length, 1, 'no injected heading');
+    assert.ok(lines.some((l) => l.startsWith('- Stale: changed since last traced in x') && l.includes('## FAKE')));
+  });
+});

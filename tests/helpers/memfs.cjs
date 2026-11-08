@@ -7,8 +7,9 @@
  * `dirs`: extra empty project-relative directories.
  * `links`: project-relative path -> absolute path `realpath` returns for it.
  * `overrides`: replace any dep (an IO failure is a dep that throws; never chmod).
+ * `now` defaults to a fixed Date (2026-11-08T00:00:00.000Z); override it to move the clock.
  *
- * `calls` records, in call order: readFile (path), writeFile (path), rename
+ * `calls` records, in call order: readFile (path), writeFile (path), appendFile (path), rename
  * ([from, to]), mkdir (path), execFile ({ file, args, opts }), log (message),
  * error (message).
  */
@@ -16,6 +17,7 @@
 const path = require('node:path');
 
 const CWD = path.resolve(path.sep, 'proj');
+const DEFAULT_NOW = '2026-11-08T00:00:00.000Z';
 
 function enoent(p) {
   const e = new Error(`ENOENT: no such file or directory, '${p}'`);
@@ -50,7 +52,7 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
     addDirs(path.dirname(abs(rel)));
   }
 
-  const calls = { readFile: [], writeFile: [], rename: [], mkdir: [], execFile: [], log: [], error: [] };
+  const calls = { readFile: [], writeFile: [], appendFile: [], rename: [], mkdir: [], execFile: [], log: [], error: [] };
   const known = (p) => fileMap.has(p) || dirSet.has(p) || linkMap.has(p);
 
   const deps = {
@@ -83,6 +85,12 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
       fileMap.set(p, String(text));
       addDirs(path.dirname(p));
     },
+    appendFile: (p, text) => {
+      calls.appendFile.push(p);
+      fileMap.set(p, (fileMap.has(p) ? fileMap.get(p) : '') + String(text));
+      addDirs(path.dirname(p));
+    },
+    now: () => new Date(DEFAULT_NOW),
     rename: (from, to) => {
       calls.rename.push([from, to]);
       if (!fileMap.has(from)) throw enoent(from);
@@ -120,4 +128,4 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
   };
 }
 
-module.exports = { memfs, CWD };
+module.exports = { memfs, CWD, DEFAULT_NOW };
