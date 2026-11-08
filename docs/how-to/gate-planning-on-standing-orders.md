@@ -80,6 +80,8 @@ must_haves:
       verification: test
       check_kind: node-test
       check_target: tests/billing/refund-idempotent.test.cjs
+      check_violation_fixture: tests/fixtures/billing/double-refund.js
+      check_clean_fixture: tests/fixtures/billing/single-refund.js
   truths:
     - statement: "INVOICE-ROUNDING: Invoice totals round half to even."
       verification: backstop
@@ -106,7 +108,7 @@ Open the phase's `STANDING-ORDERS.md`; each finding is one line with a reason co
 | `orders_unreadable` | `ORDERS.yaml` could not be read (over 256 KiB, a link that leaves the project, or a permissions problem). |
 | `missing_check` | Only with `block_on: conflict_or_missing`. Write the check file the rule names, or set the rule to `verification: backstop` until it exists. |
 | `uncited` | A plan must cite that rule's id in its `must_haves`. Re-run planning, or add the rule's `Project as` item to the plan that implements it. |
-| `not_projected` | The rule is mentioned but not as the structured item `APPLICABLE.md` gives. Copy its `Project as` item into the plan's `must_haves` exactly (same section, same `verification`, same `check_kind` and `check_target`). |
+| `not_projected` | The rule is mentioned but not as the structured item `APPLICABLE.md` gives. Copy its `Project as` item into the plan's `must_haves` exactly: same section, a statement starting with `<id>:`, the same `verification`, and for a `test` rule `status: resolved` and the same check fields and fixtures. |
 | `check_file_modified` | A plan lists one of a rule's check files in `files_modified`. Remove it from the plan. If the check itself is wrong, fix it in its own phase first, before the phase that implements the rule. |
 | `no_plans` | Rules apply but the phase has no plans yet. |
 | `plan_unreadable` | A plan's frontmatter could not be parsed (for example it uses YAML anchors). Fix that plan. |
