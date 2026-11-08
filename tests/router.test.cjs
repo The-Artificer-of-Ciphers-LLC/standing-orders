@@ -19,6 +19,7 @@ function memDeps(files, overrides = {}) {
   const calls = { readFile: [], exists: [], log: [], error: [] };
   const deps = {
     exists: (p) => { calls.exists.push(p); return Object.prototype.hasOwnProperty.call(abs, p); },
+    realpath: (p) => p,
     statSize: (p) => Buffer.byteLength(abs[p] || '', 'utf8'),
     readFile: (p) => { calls.readFile.push(p); if (!(p in abs)) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; } return abs[p]; },
     log: (m) => calls.log.push(m),
@@ -39,7 +40,7 @@ describe('routeStandingOrdersCommand validate', () => {
     const { result, calls } = run(['standing-orders', 'validate'], { [DEFAULT_ORDERS_PATH]: ADR_EXAMPLE });
     assert.equal(result.ok, true, JSON.stringify(result.errors));
     assert.equal(result.schema, 1);
-    assert.equal(result.file, DEFAULT_ORDERS_PATH.replace(/\\/g, '/'));
+    assert.equal(result.file, '.planning/standing-orders/ORDERS.yaml');
     assert.equal(result.summary.orders, 3);
     assert.equal(result.summary.contexts, 3);
     assert.deepEqual(result.summary.byKind, { prohibition: 1, invariant: 0, variant: 2 });
@@ -85,6 +86,42 @@ describe('routeStandingOrdersCommand validate', () => {
       assert.deepEqual(result.errors.map((e) => e.code), ['path_outside_cwd'], file);
       assert.equal(calls.error.length, 1, file);
       assert.deepEqual(calls.readFile, [], file);
+    }
+  });
+
+  it('allowsFileNamesThatMerelyStartWithDots', () => {
+    // `..hidden.yaml` is a legal file name inside cwd, not a parent-directory escape.
+    const { result, calls } = run(['standing-orders', 'validate', '..hidden.yaml'], { '..hidden.yaml': ADR_EXAMPLE });
+    assert.equal(result.ok, true, JSON.stringify(result.errors));
+    assert.deepEqual(calls.error, []);
+  });
+
+  it('refusesASymlinkThatResolvesOutsideCwd', () => {
+    const outside = path.resolve(CWD, '..', 'secret.yaml');
+    const { result, calls } = run(['standing-orders', 'validate', 'link.yaml'], { 'link.yaml': 'version: 1\n' }, {
+      overrides: { realpath: (p) => (p.endsWith('link.yaml') ? outside : p) },
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.errors.map((e) => e.code), ['path_outside_cwd']);
+    assert.deepEqual(calls.readFile, [], 'nothing is read through the link');
+    assert.equal(calls.error.length, 1);
+  });
+
+  it('failsClosedWhenSizeIsUnknown', () => {
+    for (const bad of ['123', NaN, undefined]) {
+      const { result, calls } = run(['standing-orders', 'validate'], { [DEFAULT_ORDERS_PATH]: ADR_EXAMPLE }, { overrides: { statSize: () => bad } });
+      assert.deepEqual(result.errors.map((e) => e.code), ['file_unreadable'], String(bad));
+      assert.deepEqual(calls.readFile, [], String(bad));
+    }
+  });
+
+  it('rejectsUnknownFlags', () => {
+    for (const flag of ['--help', '-x', '--raw=1']) {
+      const { result, calls } = run(['standing-orders', 'validate', flag, 'rules.yaml'], { 'rules.yaml': ADR_EXAMPLE });
+      assert.equal(result.ok, false, flag);
+      assert.equal(calls.error.length, 1, flag);
+      assert.ok(/Usage: standing-orders validate/.test(calls.error[0]), flag);
+      assert.deepEqual(calls.readFile, [], flag);
     }
   });
 

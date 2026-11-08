@@ -4,13 +4,17 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fc = require('fast-check');
 
-const { parseOrders, effectiveLeaves } = require('../lib/orders.cjs');
+const { parseOrders } = require('../lib/orders.cjs');
 const { detectConflicts } = require('../lib/conflicts.cjs');
-const { doc, variant } = require('./helpers/fixtures.cjs');
-
-const SEED = 20261107;
+const { doc, variant, SEED } = require('./helpers/fixtures.cjs');
 
 const CTX = { a: {}, b: {}, c: {}, ab: { includes: ['a', 'b'] }, all: { includes: ['ab', 'c'] } };
+/** Hand-resolved leaf sets for CTX, so the oracle does not depend on lib/orders.cjs's resolver. */
+const LEAVES = { a: ['a'], b: ['b'], c: ['c'], ab: ['a', 'b'], all: ['a', 'b', 'c'] };
+function oracleLeaves(order) {
+  if (order.contexts.length === 0) return ['a', 'b', 'c'];
+  return [...new Set(order.contexts.flatMap((c) => LEAVES[c]))];
+}
 const ctxChoice = fc.subarray(['a', 'b', 'c', 'ab', 'all'], { maxLength: 2 });
 
 const variantArb = fc.record({
@@ -34,8 +38,8 @@ function oracle(d) {
       const p = d.orders[i];
       const q = d.orders[j];
       if (p.operation !== q.operation || p.outcome === q.outcome) continue;
-      const lp = new Set(effectiveLeaves(p, d));
-      const shared = effectiveLeaves(q, d).filter((l) => lp.has(l));
+      const lp = new Set(oracleLeaves(p));
+      const shared = oracleLeaves(q).filter((l) => lp.has(l));
       if (shared.length > 0) out.push([p.id, q.id].sort().join('|'));
     }
   }

@@ -5,17 +5,28 @@ const assert = require('node:assert/strict');
 
 const { parseOrders } = require('../lib/orders.cjs');
 const { detectConflicts } = require('../lib/conflicts.cjs');
-const { ADR_EXAMPLE, doc, order, variant, testOrder } = require('./helpers/fixtures.cjs');
+const { ADR_EXAMPLE, order, variant, testOrder, parsed } = require('./helpers/fixtures.cjs');
 
 const CTX = { a: {}, b: {}, all: { includes: ['a', 'b'] } };
 
-function parsed(spec) {
-  const r = parseOrders(doc(spec));
-  assert.equal(r.ok, true, JSON.stringify(r.errors));
-  return r.document;
-}
-
 describe('detectConflicts', () => {
+  it('variantsConflictWhenNoContextsAreDeclared', () => {
+    // Blocker from the adversarial review: two contradictory variants in a document with no
+    // `contexts:` section must still conflict (they share the universal context).
+    const d = parsed({ orders: [variant('X', 'o', undefined, 'x'), variant('Y', 'o', undefined, 'y')] });
+    const c = detectConflicts(d).conflicts;
+    assert.equal(c.length, 1);
+    assert.equal(c[0].kind, 'variant-outcome');
+    assert.deepEqual(c[0].contexts, ['*']);
+    const p = parsed({ orders: [order({ id: 'P', kind: 'prohibition', operation: 'o' }), variant('V', 'o', undefined, 'x')] });
+    assert.equal(detectConflicts(p).conflicts[0].kind, 'prohibition-vs-variant');
+  });
+
+  it('toleratesNullDeps', () => {
+    const d = parsed({ orders: [testOrder({ id: 'T' })] });
+    assert.deepEqual(detectConflicts(d, null).missingChecks, []);
+  });
+
   it('adrExampleHasNoConflicts', () => {
     const r = parseOrders(ADR_EXAMPLE);
     const c = detectConflicts(r.document);

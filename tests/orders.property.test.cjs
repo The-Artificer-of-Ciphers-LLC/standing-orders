@@ -5,9 +5,7 @@ const assert = require('node:assert/strict');
 const fc = require('fast-check');
 
 const { parseOrders } = require('../lib/orders.cjs');
-const { doc } = require('./helpers/fixtures.cjs');
-
-const SEED = 20261107;
+const { doc, SEED } = require('./helpers/fixtures.cjs');
 
 const ctxName = fc.stringMatching(/^[a-z][a-z0-9-]{0,6}$/);
 
@@ -48,6 +46,11 @@ describe('parseOrders — properties', () => {
           assert.ok(leaves.length >= 1, `${name} resolves to a non-empty set`);
           assert.deepEqual(leaves, [...leaves].sort(), 'sorted');
           for (const l of leaves) assert.ok(leafSet.has(l), `${l} is a leaf`);
+          // Idempotence of resolution: resolving the resolved set again changes nothing,
+          // because every member is a leaf whose own leaf set is itself.
+          const again = [...new Set(leaves.flatMap((l) => leafSets[l]))].sort();
+          assert.deepEqual(again, leaves, `${name}: resolve(resolve(x)) == resolve(x)`);
+          for (const l of leaves) assert.deepEqual(leafSets[l], [l], `leaf ${l} resolves to itself`);
           const hasChildren = (contexts[name].includes || []).length > 0 ||
             Object.values(contexts).some((c) => c.extends === name);
           if (!hasChildren) assert.deepEqual(leaves, [name]);

@@ -107,4 +107,16 @@ function codes(list) {
   return list.map((e) => e.code);
 }
 
-module.exports = { ADR_EXAMPLE, yamlOf, order, testOrder, variant, doc, codes };
+/** Parse a document spec and return the parsed document, failing loudly if it is invalid. */
+function parsed(spec) {
+  const assert = require('node:assert/strict');
+  const { parseOrders } = require('../../lib/orders.cjs');
+  const r = parseOrders(doc(spec));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  return r.document;
+}
+
+/** One fast-check seed for every property suite, so a failure is reproducible across files. */
+const SEED = 20261107;
+
+module.exports = { ADR_EXAMPLE, yamlOf, order, testOrder, variant, doc, codes, parsed, SEED };

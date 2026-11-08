@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseOrders, effectiveLeaves, KINDS, VERIFICATIONS, CHECK_KINDS } = require('../lib/orders.cjs');
+const { parseOrders, effectiveLeaves, KINDS, VERIFICATIONS, CHECK_KINDS, UNIVERSAL_CONTEXT } = require('../lib/orders.cjs');
 const { ADR_EXAMPLE, doc, order, testOrder, variant, codes } = require('./helpers/fixtures.cjs');
 
 describe('parseOrders — happy path', () => {
@@ -103,6 +103,24 @@ describe('parseOrders — YAML boundary (hostile input)', () => {
     assert.deepEqual(codes(r.errors), ['yaml_null_byte']);
   });
 
+  it('rejectsDuplicateMappingKeys', () => {
+    // A second `orders:` key would otherwise silently replace the first (adversarial review).
+    const r = parseOrders('version: 1\norders:\n  - id: A\n    kind: invariant\n    statement: s\n    verification: backstop\norders: []\n');
+    assert.equal(r.ok, false);
+    assert.deepEqual(codes(r.errors), ['yaml_syntax']);
+    assert.ok(/duplicated mapping key/.test(r.errors[0].message));
+    const dupField = parseOrders('version: 1\norders:\n  - id: A\n    kind: invariant\n    statement: first\n    statement: second\n    verification: backstop\n');
+    assert.deepEqual(codes(dupField.errors), ['yaml_syntax']);
+  });
+
+  it('treatsBareMergeKeyAsUnknownKey', () => {
+    // Without an anchor there is nothing to merge: FAILSAFE reads `<<` as a plain key, which the strict whitelist rejects.
+    const r = parseOrders('version: 1\norders:\n  - <<: { id: A }\n');
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => e.code === 'unknown_key' && e.path === '$.orders[0].<<'));
+    assert.equal(r.document, null);
+  });
+
   it('reportsYamlSyntaxErrors', () => {
     const r = parseOrders('version: 1\norders: [unclosed\n');
     assert.equal(r.ok, false);
@@ -177,6 +195,25 @@ describe('parseOrders — contexts', () => {
     assert.deepEqual(r.document.leafSets.all, ['a', 'b', 'c']);
     assert.deepEqual(r.document.leafSets.c, ['c']);
     assert.deepEqual(r.document.allLeaves, ['a', 'b', 'c']);
+  });
+
+  it('resolvesIncludesAndExtendsOnOneContext', () => {
+    // `mid` both includes a leaf and extends a parent: it is a member of `top` and the union of its own members.
+    const r = parseOrders(doc({ contexts: { leaf: {}, other: {}, top: {}, mid: { includes: ['leaf', 'other'], extends: 'top' } } }));
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(r.document.leafSets.mid, ['leaf', 'other']);
+    assert.deepEqual(r.document.leafSets.top, ['leaf', 'other']);
+    assert.deepEqual(r.document.allLeaves, ['leaf', 'other']);
+  });
+
+  it('survivesAVeryDeepMembershipChainWithoutThrowing', () => {
+    const contexts = { c0: {} };
+    for (let i = 1; i < 6000; i++) contexts[`c${i}`] = { includes: [`c${i - 1}`] };
+    let r;
+    assert.doesNotThrow(() => { r = parseOrders(doc({ contexts })); });
+    assert.equal(typeof r.ok, 'boolean');
+    if (!r.ok) assert.deepEqual(codes(r.errors), ['context_too_deep']);
+    else assert.deepEqual(r.document.leafSets.c5999, ['c0']);
   });
 
   it('extendsMakesChildAMemberOfParent', () => {
@@ -278,6 +315,24 @@ describe('parseOrders — orders', () => {
     assert.deepEqual(r.document.orders[1].contexts, []);
     assert.deepEqual(effectiveLeaves(r.document.orders[0], r.document), ['a', 'b']);
     assert.deepEqual(effectiveLeaves(r.document.orders[1], r.document), ['a', 'b']);
+  });
+
+  it('effectiveLeavesWithoutDeclaredContextsIsTheUniversalContext', () => {
+    // Blocker from the adversarial review: an empty leaf set made every conflict undetectable.
+    const r = parseOrders(doc({ orders: [order({ id: 'X' })] }));
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.document.allLeaves, []);
+    assert.deepEqual(effectiveLeaves(r.document.orders[0], r.document), [UNIVERSAL_CONTEXT]);
+    assert.equal(UNIVERSAL_CONTEXT, '*');
+  });
+
+  it('rejectsEmptyRequiredStrings', () => {
+    for (const field of ['id', 'statement']) {
+      const r = parseOrders(doc({ orders: [order({ [field]: '' })] }));
+      assert.deepEqual(r.errors.map((e) => [e.code, e.path]), [['type_invalid', `$.orders[0].${field}`]], field);
+    }
+    const blankPath = parseOrders(doc({ orders: [order({ scope: { paths: [''] } })] }));
+    assert.deepEqual(blankPath.errors.map((e) => [e.code, e.path]), [['type_invalid', '$.orders[0].scope.paths[0]']]);
   });
 
   it('effectiveLeavesUnionsNamedContexts', () => {

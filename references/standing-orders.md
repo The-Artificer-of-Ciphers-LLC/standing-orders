@@ -12,9 +12,10 @@ The enum tables below are checked by a test against the constants the parser enf
 
 - Parsed with js-yaml 4.3.2 (vendored) under `FAILSAFE_SCHEMA`: **every scalar is a string**. `outcome: 1` is the string `"1"`; `statement: true` is the string `"true"`.
 - **Anchors, aliases and merge keys are refused** before any expansion. A file containing `&name`, `*name` or `<<:` is rejected with `yaml_anchor_refused` and none of its content is parsed.
+- A bare merge key with no alias (`<<: {…}`) has nothing to merge under `FAILSAFE_SCHEMA`; it is read as a plain key named `<<` and rejected as `unknown_key`.
 - A NUL byte is rejected (`yaml_null_byte`). A leading BOM is stripped. CRLF and LF parse identically.
-- Duplicate mapping keys: last one wins (js-yaml `json: true`).
-- Unknown keys, unknown enum values and an unsupported `version` are **errors**, not warnings. Typos fail loudly.
+- A duplicated mapping key is a parse error (`yaml_syntax`), never last-wins: a second `orders:` key would otherwise silently replace the first.
+- Unknown keys, unknown enum values and an unsupported `version` are **errors**, not warnings. Typos fail loudly. Every string field must be non-empty (`type_invalid` otherwise).
 - The file must be at most 262,144 bytes (256 KiB); larger files are refused before being read (`file_too_large`).
 
 ## Document
@@ -43,9 +44,9 @@ A context name matches `^[a-z][a-z0-9-]*$` (`context_name_invalid` otherwise). E
 - `includes: [x, y]` makes `x` and `y` members; the context resolves to the union of their leaf sets.
 - `extends: p` makes this context a member of `p`. It is the same membership edge as `p` including it, written from the child's side.
 - A context that has members is **not itself a leaf**: it is exactly the union of its members. To keep a "plain" variant of a parent alongside specialisations, declare the plain variant as a member too (for example `contract-a-basic` and `contract-a-premium` both extending `contract-a`).
-- Cycles (`context_cycle`) and references to undefined names (`undefined_context`) are errors.
+- Cycles (`context_cycle`) and references to undefined names (`undefined_context`) are errors. A membership chain thousands of contexts deep is refused with `context_too_deep` rather than crashing.
 
-An order's **effective contexts** are the union of its named contexts' leaf sets, or every leaf when it names none.
+An order's **effective contexts** are the union of its named contexts' leaf sets, or every leaf when it names none. A document that declares no contexts has one universal context, written `*` in conflict reports, so its orders still overlap one another.
 
 ## Orders
 
@@ -94,10 +95,10 @@ Any `check_*` key on a `backstop` order is kept but never run (warning `check_ig
 
 ## Scope matching
 
-- `scope.paths` entries are minimal globs matched against forward-slash, project-relative paths. Backslashes are normalised to slashes on both sides, runs of slashes collapse to one, and a leading `./` is ignored.
+- `scope.paths` entries are minimal globs matched against forward-slash, project-relative paths. Backslashes are normalised to slashes on both sides, runs of slashes collapse to one, and leading `./` prefixes are ignored. Matching is segment by segment with a linear wildcard algorithm, so no pattern can make selection hang.
   - `*` matches anything within one path segment.
-  - `**` followed by `/` matches zero or more whole segments. A trailing `/**` matches the directory itself and anything below it.
-  - `?` matches exactly one non-slash character.
+  - A segment that is exactly `**` matches zero or more whole segments, so a trailing `/**` matches the directory itself and anything below it. `**` inside other text (`a**b`) behaves like `*`.
+  - `?` matches exactly one character within a segment.
   - Every other character is literal: `[`, `{`, `!`, `(` have no special meaning.
 - `scope.requirements` match requirement ids exactly (case- and whitespace-sensitive).
 - An order matches a phase when **any** path glob matches **any** phase file, **or** any requirement id matches. An order with no scope matches every phase.
@@ -133,7 +134,7 @@ node standing-orders-router.cjs validate [file] [--raw]     # phase 1: direct CL
 gsd-tools standing-orders validate [file] [--raw]           # phase 2: through the manifest
 ```
 
-- `file` defaults to `.planning/standing-orders/ORDERS.yaml` and must resolve inside the current project root.
+- `file` defaults to `.planning/standing-orders/ORDERS.yaml` and must resolve inside the current project root, both as written and after following symlinks. `--raw` is the only flag; any other `-`/`--` token is a usage error.
 - Without `--raw`: one summary line followed by one line per error, conflict and warning.
 - With `--raw`: a single-line JSON report.
 
@@ -159,8 +160,8 @@ gsd-tools standing-orders validate [file] [--raw]           # phase 2: through t
 | Code | Meaning |
 |---|---|
 | 0 | Valid: no errors, no conflicts. |
-| 1 | Invalid (errors or conflicts), or a usage error (unknown subcommand). |
-| 2 | The file could not be read: `path_outside_cwd`, `file_not_found`, `file_unreadable`, `file_too_large`. |
+| 1 | Invalid (errors or conflicts), or a usage error (unknown subcommand or flag). |
+| 2 | The file could not be read: `path_outside_cwd` (including through a symlink), `file_not_found`, `file_unreadable`, `file_too_large`. |
 
 ### Error and warning codes
 
@@ -178,6 +179,7 @@ gsd-tools standing-orders validate [file] [--raw]           # phase 2: through t
 | `context_name_invalid` | error | A context name fails `^[a-z][a-z0-9-]*$`. |
 | `undefined_context` | error | A context name that is not declared. |
 | `context_cycle` | error | `includes`/`extends` form a cycle; the error lists `members`. |
+| `context_too_deep` | error | The membership chain is too deep to resolve (thousands of nested contexts). |
 | `orders_not_list` | error | `orders` is not a list. |
 | `missing_field` | error | A required key is absent for this kind/verification. |
 | `duplicate_id` | error | An `id` already used by an earlier order. |

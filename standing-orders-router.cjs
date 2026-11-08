@@ -19,7 +19,7 @@
  * Exit codes (direct CLI only): 0 valid; 1 invalid or usage error; 2 the file
  * could not be read (missing, unreadable, too large, outside the project).
  *
- * `deps` is a test seam for I/O: { exists, statSize, readFile, log }.
+ * `deps` is a test seam for I/O: { exists, realpath, statSize, readFile, log }.
  */
 
 const fs = require('node:fs');
@@ -45,6 +45,7 @@ const FILE_ERROR_CODES = new Set([
 function defaultDeps() {
   return {
     exists: (p) => fs.existsSync(p),
+    realpath: (p) => fs.realpathSync(p),
     statSize: (p) => fs.statSync(p).size,
     readFile: (p) => fs.readFileSync(p, 'utf8'),
     log: (m) => process.stdout.write(m + '\n'),
@@ -53,6 +54,12 @@ function defaultDeps() {
 
 function toSlashes(p) {
   return String(p).replace(/\\/g, '/');
+}
+
+/** True when the absolute path `abs` is strictly inside the absolute directory `root` (a file named `..hidden` is inside). */
+function isInside(root, abs) {
+  const rel = path.relative(root, abs);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
 }
 
 function emptySummary() {
@@ -97,19 +104,28 @@ function validateFile({ cwd, fileArg, deps }) {
 
   const root = path.resolve(cwd);
   const abs = path.resolve(root, fileArg);
-  const rel = path.relative(root, abs);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (!isInside(root, abs)) {
     return fail(ERROR_CODES.PATH_OUTSIDE_CWD, `${toSlashes(fileArg)} resolves outside the project root ${toSlashes(root)}`);
   }
   if (!deps.exists(abs)) return fail(ERROR_CODES.FILE_NOT_FOUND, `${toSlashes(fileArg)} does not exist under ${toSlashes(root)}`);
 
+  // Containment is checked on the real path too, so a symlink committed inside
+  // the project cannot point the parser at a file outside it.
   let size;
   try {
-    size = deps.statSize(abs);
+    const realRoot = deps.realpath(root);
+    const realFile = deps.realpath(abs);
+    if (!isInside(realRoot, realFile)) {
+      return fail(ERROR_CODES.PATH_OUTSIDE_CWD, `${toSlashes(fileArg)} resolves (through a link) outside the project root ${toSlashes(root)}`);
+    }
+    size = deps.statSize(realFile);
   } catch (e) {
     return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} could not be examined: ${e && e.message ? e.message : String(e)}`);
   }
-  if (typeof size === 'number' && size > MAX_FILE_BYTES) {
+  if (typeof size !== 'number' || !Number.isFinite(size)) {
+    return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} has no readable size`);
+  }
+  if (size > MAX_FILE_BYTES) {
     return fail(ERROR_CODES.FILE_TOO_LARGE, `${toSlashes(fileArg)} is ${size} bytes; the limit is ${MAX_FILE_BYTES}`);
   }
 
@@ -128,9 +144,7 @@ function validateFile({ cwd, fileArg, deps }) {
 
   const existsUnderRoot = (p) => {
     const target = path.resolve(root, String(p));
-    const r = path.relative(root, target);
-    if (r.startsWith('..') || path.isAbsolute(r)) return false;
-    return deps.exists(target);
+    return isInside(root, target) && deps.exists(target);
   };
   const detected = detectConflicts(parsed.document, { exists: existsUnderRoot });
   report.conflicts = detected.conflicts;
@@ -164,7 +178,7 @@ function humanLines(report) {
  * @param {{ args: string[], cwd: string, raw?: boolean, error: (msg: string) => void, deps?: object }} options
  */
 function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = false, error = () => {}, deps = {} }) {
-  const d = { ...defaultDeps(), ...deps };
+  const io = { ...defaultDeps(), ...deps };
   const subcommand = args[1];
   if (subcommand !== 'validate') {
     const msg = subcommand
@@ -175,16 +189,22 @@ function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = fals
   }
 
   const rest = args.slice(2);
+  const unknownFlag = rest.find((a) => typeof a === 'string' && a.startsWith('-') && a !== '--raw');
+  if (unknownFlag !== undefined) {
+    const msg = `${FAMILY} validate: unknown flag ${JSON.stringify(unknownFlag)}. Usage: standing-orders validate [file] [--raw]`;
+    error(msg);
+    return { ok: false, error: msg };
+  }
   const rawOut = raw === true || rest.includes('--raw');
-  const positionals = rest.filter((a) => typeof a === 'string' && !a.startsWith('--'));
+  const positionals = rest.filter((a) => typeof a === 'string' && a !== '--raw');
   const fileArg = positionals.length > 0 ? positionals[0] : DEFAULT_ORDERS_PATH;
 
-  const report = validateFile({ cwd, fileArg, deps: d });
+  const report = validateFile({ cwd, fileArg, deps: io });
   if (report.errors.some((e) => e.code === ERROR_CODES.PATH_OUTSIDE_CWD)) {
     error(report.errors[0].message);
   }
-  if (rawOut) d.log(JSON.stringify(report));
-  else for (const l of humanLines(report)) d.log(l);
+  if (rawOut) io.log(JSON.stringify(report));
+  else for (const l of humanLines(report)) io.log(l);
   return report;
 }
 
@@ -205,4 +225,4 @@ if (require.main === module) {
   process.exitCode = exitCodeFor(report);
 }
 
-module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, DEFAULT_ORDERS_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA };
+module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, DEFAULT_ORDERS_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA };

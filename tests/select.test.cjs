@@ -5,15 +5,25 @@ const assert = require('node:assert/strict');
 
 const { parseOrders } = require('../lib/orders.cjs');
 const { globToRegExp, matchesScope, selectApplicable, renderApplicable } = require('../lib/select.cjs');
-const { ADR_EXAMPLE, doc, order } = require('./helpers/fixtures.cjs');
-
-function parsed(spec) {
-  const r = parseOrders(doc(spec));
-  assert.equal(r.ok, true, JSON.stringify(r.errors));
-  return r.document;
-}
+const { ADR_EXAMPLE, order, parsed } = require('./helpers/fixtures.cjs');
 
 describe('globToRegExp', () => {
+  it('handlesPathologicalGlobsWithoutBacktracking', () => {
+    // Each of these made the earlier RegExp compiler take seconds to minutes (adversarial review).
+    const deep = globToRegExp('**/'.repeat(10) + 'a');
+    assert.equal(deep.test('x/'.repeat(30) + 'b'), false);
+    assert.equal(deep.test('x/'.repeat(30) + 'a'), true);
+    const stars = globToRegExp('*a'.repeat(11) + '*b');
+    assert.equal(stars.test('a'.repeat(40)), false);
+    assert.equal(stars.test('a'.repeat(40) + 'b'), true);
+    const mixed = globToRegExp('**a'.repeat(10) + '**b');
+    assert.equal(mixed.test('a'.repeat(30)), false);
+  });
+
+  it('stripsRepeatedDotSlash', () => {
+    assert.equal(globToRegExp('a.js').test('./././a.js'), true);
+  });
+
   it('globDoubleStarMatchesZeroOrMoreSegments', () => {
     const re = globToRegExp('src/billing/**');
     assert.equal(re.test('src/billing/a.js'), true);
@@ -68,9 +78,19 @@ describe('globToRegExp', () => {
 
 describe('matchesScope / selectApplicable', () => {
   it('emptyScopeIsGlobal', () => {
-    const d = parsed({ orders: [order({ id: 'A' }), order({ id: 'B', scope: {} }), order({ id: 'C', scope: { paths: [] } })] });
-    for (const o of d.orders) assert.equal(matchesScope(o, { files: [], requirements: [] }), true, o.id);
+    const d = parsed({ orders: [order({ id: 'A' }), order({ id: 'B', scope: {} }), order({ id: 'C', scope: { paths: [] } }), order({ id: 'S', scope: { paths: ['src/**'] } })] });
+    for (const o of d.orders.slice(0, 3)) assert.equal(matchesScope(o, { files: [], requirements: [] }), true, o.id);
+    // With nothing to match against, only the global orders apply; the scoped one is excluded (design row 46).
     assert.deepEqual(selectApplicable(d, { files: [], requirements: [] }).map((o) => o.id), ['A', 'B', 'C']);
+  });
+
+  it('toleratesDegenerateInputs', () => {
+    const d = parsed({ orders: [order({ id: 'A', scope: { paths: ['null'] } })] });
+    assert.equal(matchesScope(d.orders[0], null), false);
+    assert.equal(matchesScope(d.orders[0], { files: [null, 'null'] }), true, 'a real path named null matches; the null entry is ignored');
+    assert.equal(matchesScope(d.orders[0], { files: [null] }), false);
+    assert.deepEqual(selectApplicable({}, {}), []);
+    assert.deepEqual(selectApplicable(undefined), []);
   });
 
   it('selectsOnlyOrdersWhosePathsMatch', () => {
@@ -190,6 +210,17 @@ describe('renderApplicable', () => {
       assert.deepEqual(r.included, [], String(cap));
       assert.deepEqual(r.omitted, ['FIRST', 'SECOND'], String(cap));
     }
+    assert.deepEqual(renderApplicable(two, { maxBytes: Infinity }).included, ['FIRST', 'SECOND'], 'Infinity means no cap');
+  });
+
+  it('collapsesUnicodeLineSeparatorsToo', () => {
+    const [LS, PS, NEL] = [0x2028, 0x2029, 0x85].map((c) => String.fromCharCode(c));
+    const d = parsed({ orders: [order({ id: 'U', statement: `a${LS}## FAKE${NEL}b${PS}c` })] });
+    const r = renderApplicable(d.orders, { maxBytes: 100000 });
+    const statementLine = r.text.split('\n').find((l) => l.startsWith('- Statement:'));
+    assert.ok(statementLine.includes('## FAKE'), 'text kept');
+    for (const ch of [LS, PS, NEL]) assert.equal(r.text.includes(ch), false, 'no Unicode line separators survive');
+    assert.equal(r.text.split('\n').filter((l) => l.startsWith('## ')).length, 1, 'exactly one real section heading');
   });
 
   it('measuresCapInUtf8Bytes', () => {

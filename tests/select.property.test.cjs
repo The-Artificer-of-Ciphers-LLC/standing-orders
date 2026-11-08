@@ -4,11 +4,9 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fc = require('fast-check');
 
-const { parseOrders } = require('../lib/orders.cjs');
+const { parseOrders, VERIFICATIONS } = require('../lib/orders.cjs');
 const { globToRegExp, normalizePath, selectApplicable, renderApplicable } = require('../lib/select.cjs');
-const { doc, order } = require('./helpers/fixtures.cjs');
-
-const SEED = 20261107;
+const { doc, order, SEED } = require('./helpers/fixtures.cjs');
 
 const segment = fc.stringMatching(/^[a-z0-9_.-]{1,6}$/);
 const globSegment = fc.oneof(segment, fc.constant('*'), fc.constant('**'), fc.constant('a?c'));
@@ -20,7 +18,7 @@ const orderArb = fc.record({
   id: fc.stringMatching(/^[A-Z][A-Z0-9-]{1,8}$/),
   paths: fc.array(glob, { maxLength: 2 }),
   requirements: fc.array(reqId, { maxLength: 2 }),
-  verification: fc.constantFrom('test', 'backstop'),
+  verification: fc.constantFrom(...VERIFICATIONS),
 });
 
 function documentOf(specs) {
@@ -43,19 +41,23 @@ describe('select — properties', () => {
     fc.assert(
       fc.property(fc.oneof(glob, fc.string()), filePath, (g, p) => {
         const re = globToRegExp(g);
-        assert.ok(re instanceof RegExp);
-        // The compiler reasons over the normalised glob (`./` stripped, slashes collapsed), so the
-        // structural claims below must too.
-        g = normalizePath(g);
+        assert.equal(typeof re.test, 'function');
+        // The matcher reasons over the normalised glob's SEGMENTS (`./` stripped, slashes collapsed,
+        // `**` meaningful only as a whole segment), so the structural claims below must too.
+        const segs = normalizePath(g).split('/');
+        const first = segs[0];
+        const last = segs[segs.length - 1];
+        const hasGlobstar = segs.includes('**');
         if (re.test(p)) {
-          // Start: a glob that begins with a wildcard may admit a different first segment (`*/**`
-          // matches every path); every other glob is start-anchored. A `**/` prefix admits any prefix.
-          if (!g.startsWith('*')) assert.equal(re.test('zz/' + p), false, 'anchored at start');
-          if (g.startsWith('**/')) assert.equal(re.test('zz/' + p), true, '**/ admits any prefix');
-          // End: without `**` the segment count is fixed, so an extra segment never matches; a `**`
-          // tail always admits one. A `**` elsewhere (`**/*`) may absorb the growth, so no claim there.
-          if (!g.includes('**')) assert.equal(re.test(p + '/zz'), false, 'anchored at end without **');
-          if (g.endsWith('**')) assert.equal(re.test(p + '/zz'), true, '** tail admits any suffix');
+          // Start: a first segment beginning with a wildcard may admit a different first segment
+          // (`*/**` matches every path); otherwise the match is start-anchored. A leading `**`
+          // segment admits any prefix.
+          if (!first.startsWith('*')) assert.equal(re.test('zz/' + p), false, 'anchored at start');
+          if (first === '**') assert.equal(re.test('zz/' + p), true, 'leading ** admits any prefix');
+          // End: without a `**` segment the segment count is fixed, so an extra segment never
+          // matches; a trailing `**` segment always admits one. A `**` elsewhere may absorb the growth.
+          if (!hasGlobstar) assert.equal(re.test(p + '/zz'), false, 'anchored at end without **');
+          if (last === '**') assert.equal(re.test(p + '/zz'), true, 'trailing ** admits any suffix');
         }
       }),
       { seed: SEED, numRuns: 300 },

@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -230,11 +231,27 @@ Each `TRACE.jsonl` record: `{ order_id, order_hash, contexts, phase, plans, chec
 
 The `plan:pre` step's `onError` is `halt` because the gate depends on its output; a silent skip would let planning run against no rules.
 
-## Open questions (must be answered before phase 2)
+## Open questions (answered 2026-11-07; evidence from gsd-core `next` @ 59508eb999)
 
-1. **Gate `query` dispatch to a third-party family.** `loop-resolver.cts` renders a gate's `check` as text for the orchestrator to run. The sibling capability uses only steps and contributions, so no third-party gate has yet been exercised. Confirm a `query` naming the `standing-orders` family is dispatched through the installed command module. If it is not, express each gate as a `step` that writes a verdict file plus a `predicate` gate over it.
-2. **Predicate-rail altitude.** gsd-core's ADR-857 amendment of 2026-06-12 makes predicate generation core substrate. Standing Orders adds an extra predicate source behind an off-by-default capability and removes nothing when off. Confirm with the gsd-core maintainer that this does not breach the altitude rule.
-3. **Public stability of `check prohibition-enforcement`.** The enforce gate depends on that verb's request and payload shape. Confirm it is a supported interface, or pin `engines.gsd` to the range where it is known to match.
+1. **Gate `query` dispatch to a third-party family — No.** The workflows run a gate as `gsd_run check ${hook.check.query}` (`gsd-core/workflows/plan-phase.md:1487`), and `src/check-command-router.cts:148-238` is a hardcoded `switch` over first-party check verbs; a `query` naming the `standing-orders` family is never dispatched through the installed command module. **Decision:** every blocking gate in §4 becomes a `step` that writes a verdict artifact plus a `predicate` gate over it. The only implemented predicate kinds are `command-exit-zero` and `artifact-frontmatter-equals` (`src/gate-predicate-evaluator.cts:43`); the `artifact-exists` / `config-equals` kinds named in ADR-894 do not exist. Phase 2 chooses between the two at design time. The manifest in §8 is superseded on this point: its three `query` gates are illustrative only.
+2. **Predicate-rail altitude — No breach, with two recorded conditions.** ADR-857's rule ("gates run against the spec = hook; predicate-generation defines the spec's reach = core") exists so that the verifier's *floor* of reach never depends on an optional plug-in. Standing Orders does not touch that floor: off, GSD is byte-identical and the core probes still generate every per-phase predicate; on, it only *adds* predicates above the floor, projected into the `must_haves.prohibitions` shape the core generator emits and graded by the unchanged core verifier. Its blocking hooks are gates run against the spec, which the rule places at hook altitude. The maintainer confirmed this reading on 2026-11-07. **Conditions:** (a) the planner contribution says the orders apply *in addition to* the phase's own predicates, never *instead of*; (b) the verifier contribution grades only the added predicates and never alters the grading of core ones. If gsd-core later wants cross-phase rules in core, this capability's `lib/` is the migration candidate (the "contribute to gsd-core as first-party" alternative below).
+3. **Public stability of `check prohibition-enforcement` — interface read from source; pin in phase 3.** The request is `{ prohibition, check: { kind, target, rule?, violationFixture?, cleanFixture? }, mode? }`, passed as `<request.json>` or `--json '<inline>'`, and the result is an `advisory` `GateVerdict` whose payload is an `EnforcementResult` (`src/gate-prohibition-enforcement.cts:17-19,48-105`). It is documented in gsd-core's `docs/CLI-TOOLS.md` and governed by ADR-1606. Phase 3 pins `engines.gsd` to the range in which this shape holds and adds a request-shape contract test.
+
+## Amendments (2026-11-07, phase 1)
+
+**A1 — gsd-core's prohibition vocabulary has no `backstop`.** `src/probe-core.cts:317` defines `ProhibitionVerification = 'test' | 'judgment'`. `backstop` is this capability's term. When phase 3 projects an order into a `must_haves.prohibitions` item it maps `backstop` → `judgment`; a `backstop` order is otherwise handed only to the verifier contribution, which reports it `insufficient_spec`.
+
+**A2 — §3 semantics made exact (confirmed by the maintainer).**
+- *Context resolution.* Every context resolves to a closed set of **leaf** contexts. A context with no members is a leaf resolving to `{ itself }`. `includes: [x, y]` is the union of x's and y's leaf sets. `extends: p` makes this context a member of `p`: the same membership edge as `p` including it, written from the child's side. A context with members is exactly the union of its members and is not itself a leaf. An order's effective contexts are the union of its named contexts' leaf sets, or every leaf when it names none. Two orders' contexts *overlap* when their effective leaf sets intersect. Cycles and undefined names are errors.
+- *Scope.* `scope.paths` are minimal globs (`*` within one segment, `**` zero or more segments, `?` one non-slash character; everything else literal) over forward-slash paths, backslashes normalised unconditionally. `scope.requirements` match exactly. An order with no scope is **global**: it applies to every phase.
+- *Strictness.* `version` must be `1`; unknown keys, unknown enum values, duplicate ids and a `variant` without `operation`/`outcome` are errors. A `test`-tier order lacking `check_violation_fixture` or `check_clean_fixture` is a **warning**, because gsd-core's prover requires both to prove a node-test check (`src/prohibition-enforcement.cts:76-86`) and will otherwise report it `flagged`.
+- *Byte cap.* `APPLICABLE.md` packs **whole** orders, `test` tier before `backstop` then by id, into `standing-orders.max_bytes` measured in UTF-8 bytes, with a header stating the orders apply in addition to the phase's own `must_haves` and a footer that always states the omitted count.
+- *Conflicts (deterministic).* `variant-outcome` (same operation, overlapping contexts, different outcomes), `prohibition-vs-variant` (same operation, overlapping contexts), `duplicate-id`. A prohibition and an invariant never conflict. An unlocatable `test`-tier `check_target` is reported separately (`missingChecks`), and whether it blocks is `standing-orders.block_on`.
+- The exact schema, codes and report shape are in [`references/standing-orders.md`](../../references/standing-orders.md), which a test keeps in parity with the code.
+
+**A3 — Rollout corrected by the phase-coverage check.** As first written, the `verify:pre` verifier contribution (PRD R12, acceptance criterion 4) and the schema reference document were owned by no phase, and phase 1's `standing-orders validate` had no reachable surface before the phase 2 manifest. Corrected: the verifier contribution moves to **phase 3**; the reference document lands in **phase 1**; `validate` is reachable in phase 1 as a direct CLI (`node standing-orders-router.cjs validate [file] [--raw]`) and through `gsd_run` from phase 2. The corrected trace passes the coverage check with zero gaps.
+
+**A4 — Dependencies.** Install is copy-only (ADR-1244 D5 rule 1; `src/capability-source.cts:786`), so the capability has no runtime npm dependencies. js-yaml 4.3.2 (`dist/js-yaml.js`, MIT) is vendored at `lib/vendor/js-yaml.cjs`, byte-identical to gsd-core's own vendored copy, with the same `FAILSAFE_SCHEMA` + anchor-refusing listener posture as `src/frontmatter.cts:240-263`; `scripts/check-vendored.cjs` guards drift against the pinned devDependency.
 
 ## Alternatives considered
 
@@ -264,11 +281,13 @@ The `plan:pre` step's `onError` is `halt` because the gate depends on its output
 
 ## Rollout
 
-| Phase | Deliverable | Exit gate |
-| --- | --- | --- |
-| 1 | `lib/orders.cjs`, `select.cjs`, `conflicts.cjs`; `standing-orders validate`. | Unit tests plus `fast-check` properties: context closure idempotent, conflict detection symmetric, selection monotone in scope; byte-cap tests at limit −1, limit, limit +1. |
-| 2 | Manifest, router, `select` step, planner contribution, `conflicts` and `coverage` gates. | Open question 1 answered; manifest passes gsd-core's validator; installs from a local path and from git. |
-| 3 | `enforce` gate via `check prohibition-enforcement`; check-target edit rule. | Open question 3 answered; RED fixture for a plan editing a check target. |
-| 4 | `trace`, `impact`, `stale`. | Append-only property test; hash stable under key reorder. |
-| 5 | Promotion skill; LLM conflict skill. | Dismissal-needs-reason and `--auto`-never-dismisses tests. |
-| 6 | Mutation hardening. | Separate ADR. |
+Each phase is one sub-issue and one PR, stacked on `main`; epic [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1). Corrected per amendment A3.
+
+| Phase | Issue | Deliverable | Owns (PRD) | Exit gate |
+| --- | --- | --- | --- | --- |
+| 1 | #2 | `lib/orders.cjs`, `select.cjs`, `conflicts.cjs`; router with `validate` (direct CLI); `references/standing-orders.md`; vendored js-yaml; this amendment. | R1, R2, R3, R4, R5 (library), R6 (library), AC7 | Unit tests plus `fast-check` properties: context closure idempotent, conflict detection symmetric, selection monotone in scope; byte-cap tests at limit −1, limit, limit +1; `validate` runnable as a direct CLI. |
+| 2 | #3 | Manifest, `select`/`conflicts`/`coverage` subcommands, `plan:pre` select step, planner contribution, `plan:pre` and `plan:post` gates as step + `predicate`. | R5 (wiring), R6 (gate), R7, R9, R17, AC1, AC2, AC5 | Manifest passes gsd-core's validator; installs from a local path and from git; `standing-orders` family reachable through `gsd_run`. |
+| 3 | #4 | `enforce` gate via `check prohibition-enforcement` (with `backstop` → `judgment`, A1); check-target edit rule extending `coverage`; **`verify:pre` verifier contribution**. | R10, R11, R12, AC3, AC4, AC8 | Request-shape contract test against the pinned `engines.gsd`; RED fixture for a plan editing a check target; `backstop` → `insufficient_spec`. |
+| 4 | #5 | `trace`, `impact`, `stale`; `select` warns on stale orders. | R13, R14, R15, AC6 | Append-only property test; hash stable under key reorder; `impact` and `stale` reachable through `gsd_run`. |
+| 5 | #6 | Promotion skill; LLM conflict skill (`agentVerdict`, non-blocking). | R8, R16 | Dismissal-needs-reason and `--auto`-never-dismisses tests. |
+| 6 | #7 | Mutation hardening. | — | Separate ADR before any implementation. |
