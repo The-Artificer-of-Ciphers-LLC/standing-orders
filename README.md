@@ -4,20 +4,26 @@ A [GSD](https://github.com/open-gsd/gsd-core) **third-party capability** (ADR-12
 
 The name comes from the military term: a standing order stays in force across every mission until someone revokes it. A GSD phase is a mission; a standing order outlives it.
 
-**Status: phase 1 of 6.** This release ships the core library and the `validate` command. The loop wiring (manifest, `plan:pre` selection, gates), enforcement, tracing and promotion follow in later phases; see the [epic](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+**Status: phase 2 of 6.** This release ships the core library, the capability manifest, and the planning loop: `select`, `conflicts`, `coverage` and `validate`, a planner contribution, and blocking conflict and coverage gates. Enforcement, tracing and promotion follow in later phases; see the [epic](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 
 ## Documentation
 
 | Need | Where |
 | --- | --- |
+| Install it and gate planning on your rules | [How to gate GSD planning on your standing orders](docs/how-to/gate-planning-on-standing-orders.md) |
 | Validate a rules file right now | [How to validate ORDERS.yaml](docs/how-to/validate-standing-orders.md) |
 | Exact schema, matching rules, conflict kinds, report shape, error codes | [`references/standing-orders.md`](references/standing-orders.md) |
 | Why it is shaped this way | [ADR-0001](docs/adr/0001-standing-orders-architecture.md) |
 | What it must do, and the evidence behind it | [PRD-0001](docs/prd/0001-standing-orders.md) |
 
-## Install (phase 2)
+## Install
 
-Installation through `gsd capability install` arrives with the manifest in phase 2. Until then, clone the repository and run the validator directly (see the how-to). There are no runtime dependencies to install: the YAML parser is vendored under `lib/vendor/`.
+```bash
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.2.0
+gsd config-set standing-orders.enabled true
+```
+
+Requires gsd-core 1.19.0 or newer. It is off until enabled. There are no runtime dependencies: the YAML parser is vendored under `lib/vendor/`. Full steps, including what to do when planning stops, are in the [how-to](docs/how-to/gate-planning-on-standing-orders.md).
 
 ## Development
 

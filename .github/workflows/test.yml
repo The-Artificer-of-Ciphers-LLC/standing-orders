@@ -24,3 +24,34 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run vendor:check
+
+  host-contract:
+    # Runs tests/host-contract.test.cjs against real gsd-core releases: the
+    # engines.gsd floor and the latest pinned release (phase 2 exit gate).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gsd: ['1.19.0', '1.20.1']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Fetch gsd-core ${{ matrix.gsd }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/gsd"
+          cd "$RUNNER_TEMP/gsd"
+          npm pack "@opengsd/gsd-core@${{ matrix.gsd }}" --silent
+          tar xzf opengsd-gsd-core-*.tgz
+          cd package && npm install --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Host contract tests
+        env:
+          GSD_CORE_DIR: ${{ runner.temp }}/gsd/package
+          # gsd-core 1.19-1.20 cannot check out a non-default ref after its clone
+          # (#sha:<commit> and branch names both fail), so install-from-git runs on
+          # pushes to main only, against the default branch.
+          STANDING_ORDERS_GIT_SOURCE: ${{ github.event_name == 'push' && format('{0}/{1}.git', github.server_url, github.repository) || '' }}
+        run: node --test tests/host-contract.test.cjs

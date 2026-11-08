@@ -105,7 +105,7 @@ Any `check_*` key on a `backstop` order is kept but never run (warning `check_ig
 
 ## Conflicts (deterministic)
 
-`standing-orders validate` reports, and (from phase 2) the `plan:pre` gate blocks on:
+`standing-orders validate` reports, and the planning gates block on (see [Blocking rules](#blocking-rules)):
 
 | Kind | Condition |
 |---|---|
@@ -115,11 +115,11 @@ Any `check_*` key on a `backstop` order is kept but never run (warning `check_ig
 
 A prohibition and an invariant on one operation never conflict (both hold). Orders without an `operation` never conflict.
 
-A `test`-tier order whose `check_target` does not exist under the project root is reported under `missingChecks` with warning `check_target_missing`. It is not a conflict; whether it blocks planning is the `standing-orders.block_on` setting (phase 2).
+A `test`-tier order whose `check_target` does not exist under the project root is reported under `missingChecks` with warning `check_target_missing`. It is not a conflict; whether it blocks planning is the `standing-orders.block_on` setting.
 
 ## APPLICABLE.md rendering
 
-The `select` step (phase 2) writes the applicable orders for a phase using this renderer:
+`standing-orders select` writes the applicable orders for a phase using this renderer:
 
 - A header stating that the orders apply **in addition to** the phase's own `must_haves`, never instead of them.
 - Orders in deterministic order: `test` tier before `backstop`, then by `id`.
@@ -127,11 +127,120 @@ The `select` step (phase 2) writes the applicable orders for a phase using this 
 - Every rendered scalar is one line; control characters are replaced with U+FFFD.
 - A footer always states `N applicable order(s) omitted to stay within the byte cap.` (The cap value itself is not embedded, so the footer's length depends only on the count.)
 
+## Configuration
+
+Keys live in `.planning/config.json` as **nested** objects, the way gsd-core stores capability config: `{ "standing-orders": { "enabled": true, "block_on": "conflict" } }`. A flat key named `"standing-orders.enabled"` is not read. The workstream config (`.planning[/<GSD_PROJECT>]/workstreams/<GSD_WORKSTREAM>/config.json`) is read first, then the root `.planning/config.json`, then the default; a config file that is not valid JSON counts as not setting the key.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts` and `coverage` write nothing. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
+| `standing-orders.block_on` | enum | `conflict` | What blocks planning. An unknown value falls back to `conflict` with warning `config_invalid`. |
+| `standing-orders.max_bytes` | number | `6000` | UTF-8 byte cap for `APPLICABLE.md`. Must be a whole number ≥ 0; anything else (including the string `"6000"`) falls back to `6000` with warning `config_invalid`. |
+
+- **block_on** — one of: `conflict` | `conflict_or_missing` | `never`
+
+## Loop wiring
+
+| Point | Hook | What it does |
+|---|---|---|
+| `plan:pre` | step `standing-orders select` | Writes `APPLICABLE.md`, `CONFLICTS.json` and the phase verdict with `coverage: pending`. |
+| `plan:pre` | contribution into `planner` | Tells the planner to run `select` itself, stop on a block, read `APPLICABLE.md`, cite every applicable order in `must_haves`, and never list a check target in `files_modified`. |
+| `plan:pre` | gate, blocking | `conflicts == clear` in the verdict. |
+| `plan:post` | step `standing-orders coverage` | Recomputes conflicts and citations from the written plans; rewrites the verdict. |
+| `plan:post` | gate, blocking | `conflicts == clear`. |
+| `plan:post` | gate, blocking | `coverage == complete`. |
+
+Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not yet run third-party `plan:pre` command steps or gates ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)); until it does, the planner-run `select` is the `plan:pre` check and the `plan:post` gates are the mechanical block (ADR-0001 A5).
+
+## Phase inputs
+
+- **Phase directory and requirement ids.** `--phase-dir <dir>` (and optionally `--req-ids "A, B"`) names them directly. `--phase <N>` asks the host: the router runs gsd-core's `init plan-phase <N> --raw` (no shell, bounded by a timeout) and reads `phase_dir` and `phase_req_ids`. The directory must resolve inside the project root, also after following symlinks.
+- **Files.** The backtick-quoted paths named in the phase directory's planning markdown (every `*.md` except plans, summaries and the verdict; fenced code blocks are skipped), plus every plan's `files_modified`, plus `--files a,b`. Only tokens that look like relative paths count: no whitespace, no shell metacharacters, no URL, no `..` segment, containing `/` or ending in an extension.
+- **Requirements.** The phase's requirement ids plus every plan's `requirements`.
+- **Plans.** `*-PLAN.md` in the phase directory. Their frontmatter is parsed like `ORDERS.yaml` (anchors and aliases refused, every scalar a string). A plan whose frontmatter cannot be read makes coverage `incomplete` (`plan_unreadable`): what cannot be read cannot be counted as covered.
+- **Citation.** An order is cited when its id appears in a string anywhere under a plan's `must_haves`, as a whole token: the characters around it must not be letters, digits, `_` or `-`. `REFUND-A` is not cited by `REFUND-AB`. A citation is a mention, not a judgement: whether the plan actually honors the order is graded at verification.
+- **Unusable rules.** When `ORDERS.yaml` is invalid or unreadable, `APPLICABLE.md` says so on its own line (`ORDERS.yaml could not be used (<state>): planning is blocked until it is fixed. Run standing-orders validate.`), so the planner never reads an empty list as "no rules apply". `select` writes the verdict first, then `APPLICABLE.md`, then `CONFLICTS.json`.
+
+## Blocking rules
+
+`conflicts` is `blocked` when any of these holds, unless `block_on` is `never`:
+
+| Reason code | Condition |
+|---|---|
+| `orders_unreadable` | `ORDERS.yaml` exists but could not be read (too large, unreadable, outside the project). |
+| `orders_invalid` | `ORDERS.yaml` has errors. |
+| `conflict` | A conflict involves at least one order applicable to this phase. Conflicts between orders that do not apply here are reported as `unrelatedConflicts` and do not block. |
+| `missing_check` | `block_on` is `conflict_or_missing` and an applicable `test`-tier order's `check_target` was not found. |
+
+A missing `ORDERS.yaml` is not a block: it means there are no rules yet (warning `orders_file_missing`).
+
+`coverage` (written by `standing-orders coverage`) is `incomplete` when any of these holds, and the file has at least one order:
+
+| Reason code | Condition |
+|---|---|
+| `plan_unreadable` | A plan's frontmatter could not be read. |
+| `no_plans` | At least one order applies and the phase has no plans. |
+| `uncited` | An applicable order is cited by no plan's `must_haves`. |
+
+## Verdict file: `<phase dir>/STANDING-ORDERS.md`
+
+Machine-written; the gates read its frontmatter with gsd-core's `artifact-frontmatter-equals` predicate. Any other file in the phase directory whose name ends in `-STANDING-ORDERS.md` makes the gate ambiguous, and it blocks.
+
+```markdown
+---
+schema: "1"
+phase: "03-billing"
+conflicts: clear
+coverage: pending
+generated_by: select
+applicable: "REFUND-IDEMPOTENT, REFUND-AMOUNT-A"
+---
+```
+
+- **conflicts** — one of: `clear` | `blocked`
+- **coverage** — one of: `pending` | `complete` | `incomplete` | `error`
+  - `pending`: written by `select` at the start of every planning run, so an earlier `complete` can never carry over.
+  - `error`: `coverage` failed after resolving the phase; the gate blocks.
+
+The body lists one `- <reason code>: <message>` line per finding, or `- no blocking findings`.
+
+## Commands: `standing-orders select | conflicts | coverage`
+
+```
+gsd-tools standing-orders select    (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
+gsd-tools standing-orders conflicts (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
+gsd-tools standing-orders coverage  (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
+```
+
+- `standing-orders select` writes `.planning/standing-orders/APPLICABLE.md`, `.planning/standing-orders/CONFLICTS.json` and the verdict (`coverage: pending`).
+- `standing-orders conflicts` computes the same blocking decision and writes nothing.
+- `standing-orders coverage` writes only the verdict, with `conflicts` recomputed and `coverage` decided.
+- `--ws <name>` is accepted and ignored (the host has already applied it through `GSD_WORKSTREAM`). Any other flag, a positional argument, a flag without its value, or giving both or neither of `--phase` and `--phase-dir` is a usage error.
+- Writes are atomic (temporary file, then rename).
+- With `--raw`, one JSON line: `{ schema: 1, subcommand, ok, disabled, phase: { dir, reqIds }, conflicts, coverage, reasons, applicable, omitted, uncited, unrelatedConflicts, errors, warnings, written }`. `ok` false means the command could not look (codes below), not that it blocked. Disabled: `{ schema: 1, subcommand, ok: true, disabled: true, message, written: [] }`.
+- `CONFLICTS.json` is `{ schema: 1, phase, status, reasons, conflicts, missingChecks, errors, warnings }`; each conflict and missing check carries `applicable: true|false`.
+
+Direct-CLI exit codes for these three: 0 clear (or disabled); 1 blocked, coverage `incomplete` or `error`, or a usage error; 2 could not look (phase unresolved, path outside the project, write failed).
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `usage` | error | Bad or missing flags. |
+| `phase_dir_not_found` | error | The phase directory does not exist. |
+| `host_unavailable` | error | `--phase` was given but no gsd-tools CLI was found (`GSD_TOOLS`, or the dispatching `gsd-tools`); pass `--phase-dir`. |
+| `phase_unresolved` | error | The host could not resolve the phase (not found, failed, timed out, or unparseable output). |
+| `write_failed` | error | An output file could not be written. |
+| `internal_error` | error | An unexpected failure inside the router; nothing is assumed to be written. |
+| `orders_file_missing` | warning | No `ORDERS.yaml`; treated as no rules. |
+| `config_invalid` | warning | A config value was rejected and its default used. |
+| `phase_dir_unreadable` | warning | The phase directory could not be listed; no files or plans were read. |
+| `doc_unreadable` | warning | A planning document could not be read and was skipped. |
+| `doc_too_large` | warning | A planning document over 1 MiB was skipped. |
+
 ## Command: `standing-orders validate`
 
 ```
-node standing-orders-router.cjs validate [file] [--raw]     # phase 1: direct CLI
-gsd-tools standing-orders validate [file] [--raw]           # phase 2: through the manifest
+node standing-orders-router.cjs validate [file] [--raw]     # direct CLI
+gsd-tools standing-orders validate [file] [--raw]           # through the installed capability
 ```
 
 - `file` defaults to `.planning/standing-orders/ORDERS.yaml` and must resolve inside the current project root, both as written and after following symlinks. `--raw` is the only flag; any other `-`/`--` token is a usage error.

@@ -422,4 +422,10 @@ describe('parseOrders — orders', () => {
     assert.equal(o.check_kind, null);
     assert.deepEqual(o.scope, { paths: [], requirements: [] });
   });
+
+  it('duplicateKeyCannotHideAnAnchor', () => {
+    const r = parseOrders('version: "1"\nversion: "2"\nx: &x [a, b]\ny: *x\n');
+    assert.equal(r.ok, false);
+    assert.deepEqual(codes(r.errors), ['yaml_anchor_refused']);
+  });
 });

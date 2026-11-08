@@ -4,11 +4,12 @@ Organized by what you need (Diátaxis).
 
 ## How-to guides
 
+- [How to gate GSD planning on your standing orders](how-to/gate-planning-on-standing-orders.md)
 - [How to validate ORDERS.yaml](how-to/validate-standing-orders.md)
 
 ## Reference
 
-- [`references/standing-orders.md`](../references/standing-orders.md) — schema, matching rules, conflict kinds, `validate` report and codes
+- [`references/standing-orders.md`](../references/standing-orders.md) — schema, matching rules, conflict kinds, configuration, loop wiring, blocking rules, the verdict file, every command and its codes
 
 ## Explanation
 
