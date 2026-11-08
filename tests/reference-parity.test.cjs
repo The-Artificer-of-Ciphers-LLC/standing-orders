@@ -63,3 +63,20 @@ describe('references/standing-orders.md phase 3 parity', () => {
     assert.ok(DOC.includes('`enforcement`'), 'reference doc documents the enforcement verdict field');
   });
 });
+
+describe('references/standing-orders.md phase 5 parity', () => {
+  it('referenceDocListsPhase5Surface', () => {
+    const { SUBCOMMANDS } = require('../standing-orders-router.cjs');
+    const { PROMOTE_CODES } = require('../lib/promote.cjs');
+    const { SEMANTIC_CODES } = require('../lib/semantic.cjs');
+    assert.ok(SUBCOMMANDS.includes('promote'), 'the router lists promote');
+    assert.ok(SUBCOMMANDS.includes('semantic'), 'the router lists semantic');
+    assert.ok(DOC.includes('`standing-orders promote`'), 'reference doc documents the promote subcommand');
+    assert.ok(DOC.includes('`standing-orders semantic`'), 'reference doc documents the semantic subcommand');
+    for (const code of [...Object.values(PROMOTE_CODES), ...Object.values(SEMANTIC_CODES)]) {
+      assert.ok(DOC.includes('`' + code + '`'), `reference doc documents code ${code}`);
+    }
+    const capability = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'capability.json'), 'utf8'));
+    assert.deepEqual(capability.commands[0].subcommands, [...SUBCOMMANDS], 'capability.json subcommands equal the router SUBCOMMANDS');
+  });
+});
