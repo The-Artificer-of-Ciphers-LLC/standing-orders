@@ -16,6 +16,7 @@ The name comes from the military term: a standing order stays in force across ev
 | See which shipped phases a rule change affects | [How to find what a rule change affects](docs/how-to/find-what-a-rule-change-affects.md) |
 | Turn a phase's settled rules into standing orders | [How to promote a phase's rules to standing orders](docs/how-to/promote-phase-rules-to-standing-orders.md) |
 | Check orders against a spec for contradictions in meaning | [How to review semantic conflicts between orders and a spec](docs/how-to/review-semantic-conflicts.md) |
+| Prove a check with more than one bad input (`standing-orders mutants`) | [How to harden a standing order with mutants](docs/how-to/harden-a-standing-order-with-mutants.md) |
 | Exact schema, matching rules, conflict kinds, report shape, error codes | [`references/standing-orders.md`](references/standing-orders.md) |
 | Why it is shaped this way | [ADR-0001](docs/adr/0001-standing-orders-architecture.md) |
 | What it must do, and the evidence behind it | [PRD-0001](docs/prd/0001-standing-orders.md) |
@@ -23,7 +24,7 @@ The name comes from the military term: a standing order stays in force across ev
 ## Install
 
 ```bash
-gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.5.0
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.6.0
 gsd config-set standing-orders.enabled true
 ```
 
@@ -37,7 +38,7 @@ npm test             # node --test + fast-check, ~130 tests
 npm run vendor:check # vendored js-yaml is byte-identical to the pinned devDependency
 ```
 
-Requires Node 20 or newer. Tests are authored with `node:test`; property tests use a fixed seed so a failure reproduces.
+Requires Node 22 or newer (Node 20 reached end of life on 2026-04-30). Tests are authored with `node:test`; property tests use a fixed seed so a failure reproduces.
 
 ## License
 

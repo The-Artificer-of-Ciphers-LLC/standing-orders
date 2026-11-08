@@ -97,6 +97,52 @@ describe('orderHash', () => {
   });
 });
 
+// Phase 6 (#7), ADR-0002 section 1: `check_mutants` is a set for hashing. Rows 13-14 (H2, H3).
+describe('orderHash: check_mutants', () => {
+  const { ADR_EXAMPLE } = require('./helpers/fixtures.cjs');
+  const { parseOrders } = require('../lib/orders.cjs');
+  const base = () => parsed({ orders: [testOrder({ id: 'TEST-1', statement: 'Never double refund.', scope: { paths: ['src/billing/**'], requirements: ['BILL-04'] } })] }).orders[0];
+
+  // Literals computed with the phase-5 code (before `check_mutants` existed). An order without mutants must keep its
+  // hash, or every ledger written so far would report its test orders `changed` after the upgrade.
+  it('hashUnchangedWithoutMutants', () => {
+    assert.equal(orderHash(base()), 'sha256:3dc4bd0525773937fe856126ca078d97b51faca9538f6a01591984514b682636');
+    assert.equal(orderHash(parseOrders(ADR_EXAMPLE).document.orders[0]), 'sha256:2364482596a0785f20cbab56f0306d991adde8bac6eec8bf03830d1f79a8bfb4');
+    const bare = { ...base() };
+    delete bare.check_mutants;
+    assert.equal(orderHash(bare), 'sha256:3dc4bd0525773937fe856126ca078d97b51faca9538f6a01591984514b682636', 'with the key absent');
+    assert.equal(orderHash({ ...bare, check_mutants: [] }), orderHash(bare), 'with an empty list');
+  });
+
+  it('mutantChangesHash', () => {
+    const o = base();
+    const one = orderHash({ ...o, check_mutants: ['tests/fixtures/mutants/m1.js'] });
+    assert.notEqual(one, orderHash(o), 'adding the first mutant changes the hash');
+    const two = orderHash({ ...o, check_mutants: ['tests/fixtures/mutants/m1.js', 'tests/fixtures/mutants/m2.js'] });
+    assert.notEqual(two, one, 'adding a second one changes it again');
+    assert.notEqual(orderHash({ ...o, check_mutants: ['tests/fixtures/mutants/other.js'] }), one, 'a different mutant is a different order');
+    assert.equal(orderHash({ ...o, check_mutants: ['tests/fixtures/mutants/m2.js', 'tests/fixtures/mutants/m1.js', 'tests/fixtures/mutants/m2.js'] }), two, 'order and repeats do not matter');
+  });
+
+  it('canonicalOrderSortsMutantsWithoutMutating', () => {
+    const o = { ...base(), check_mutants: ['b.js', 'a.js', 'b.js'] };
+    const before = JSON.stringify(o);
+    assert.deepEqual(canonicalOrder(o).check_mutants, ['a.js', 'b.js']);
+    assert.equal(JSON.stringify(o), before, 'the input order is not mutated');
+    assert.equal(canonicalOrder(base()).check_mutants === undefined || canonicalOrder(base()).check_mutants.length === 0, true);
+  });
+
+  // The ledger records `flagged` for an order whose mutant survived: the result keeps status green, flagged true.
+  it('dispositionSeesMutantFlag', () => {
+    const o = base();
+    const enforcement = (result) => ({ phase: PHASE_3, results: [{ id: 'TEST-1', ...result }] });
+    const killed = { status: 'green', flagged: false, reason: 'ok', mutants: [{ path: 'm.js', outcome: 'killed', cached: false, reason: 'ok' }] };
+    const survived = { status: 'green', flagged: true, reason: 'mutant_survived: m.js', mutants: [{ path: 'm.js', outcome: 'survived', cached: false, reason: 'x' }] };
+    assert.equal(dispositionFor(o, enforcement(killed), PHASE_3), 'proven');
+    assert.equal(dispositionFor(o, enforcement(survived), PHASE_3), 'flagged');
+  });
+});
+
 describe('appendText', () => {
   it('appendAfterMissingNewline', () => {
     const r1 = rec();

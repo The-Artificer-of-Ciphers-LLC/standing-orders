@@ -10,6 +10,7 @@ Organized by what you need (Diátaxis).
 - [How to find what a rule change affects](how-to/find-what-a-rule-change-affects.md)
 - [How to promote a phase's rules to standing orders](how-to/promote-phase-rules-to-standing-orders.md)
 - [How to review semantic conflicts between orders and a spec](how-to/review-semantic-conflicts.md)
+- [How to harden a standing order's check with mutants](how-to/harden-a-standing-order-with-mutants.md)
 
 ## Reference
 
@@ -18,4 +19,5 @@ Organized by what you need (Diátaxis).
 ## Explanation
 
 - [ADR-0001: Standing Orders architecture](adr/0001-standing-orders-architecture.md)
+- [ADR-0002: Mutation hardening of standing-order checks](adr/0002-mutation-hardening.md)
 - [PRD-0001: Standing Orders](prd/0001-standing-orders.md) and its [source research](prd/research/2026-11-07-crespo-article-review.md)

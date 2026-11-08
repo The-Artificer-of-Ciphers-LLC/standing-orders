@@ -16,13 +16,14 @@
  * Subcommands: `validate` (phase 1), the loop wiring `select`, `conflicts` and
  * `coverage` (phase 2), the execution gate `enforce` (phase 3) and the
  * traceability ledger `trace`, `impact` and `stale` (phase 4), and the authoring
- * commands `promote` and `semantic` (phase 5). The same verbs are reachable directly:
+ * commands `promote` and `semantic` (phase 5) and `mutants` (phase 6). The same verbs are reachable directly:
  *   node standing-orders-router.cjs validate [file] [--raw]
  *   node standing-orders-router.cjs select|conflicts|coverage|enforce|trace (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
  *   node standing-orders-router.cjs impact <order-id> [--raw]
  *   node standing-orders-router.cjs stale [--raw]
  *   node standing-orders-router.cjs promote (--candidates (--phase <n> | --phase-dir <dir>) | --add <order-json>) [--raw]
  *   node standing-orders-router.cjs semantic propose|resolve|list (--phase <n> | --phase-dir <dir>) [--findings <json>] [--id <S-n> --status <s> [--reason <text>]] [--auto] [--raw]
+ *   node standing-orders-router.cjs mutants (--order <id> | --add <json> | --run --order <id> [--no-cache]) [--raw]
  * Exit codes (direct CLI only): 0 ok; 1 invalid, blocked, incomplete, stale or
  * usage error; 2 a file or directory could not be read or resolved.
  *
@@ -56,12 +57,13 @@ const {
   countFindings,
   serializeSemantic,
 } = require('./lib/semantic.cjs');
+const mutantsLib = require('./lib/mutants.cjs');
 
 const FAMILY = 'standing-orders';
-const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
+const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
 const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace']);
 const QUERY_SUBCOMMANDS = Object.freeze(['impact', 'stale']);
-const AUTHORING_SUBCOMMANDS = Object.freeze(['promote', 'semantic']);
+const AUTHORING_SUBCOMMANDS = Object.freeze(['promote', 'semantic', 'mutants']);
 /** Upper bound for the one `git log` call that names the code commit a trace belongs to. */
 const GIT_TIMEOUT_MS = 10000;
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
@@ -127,6 +129,7 @@ function defaultDeps() {
     appendFile: (p, text) => fs.appendFileSync(p, text),
     now: () => new Date(),
     rename: (from, to) => fs.renameSync(from, to),
+    unlink: (p) => fs.unlinkSync(p),
     mkdir: (p) => fs.mkdirSync(p, { recursive: true }),
     execFile: (file, args, opts) => require('node:child_process').execFileSync(file, args, opts),
     env: process.env,
@@ -267,7 +270,7 @@ const VALUE_FLAGS = new Set(['--phase', '--phase-dir', '--req-ids', '--files', '
 
 /** Parse the loop flags. Returns { options } or { usage: message }. */
 function parseLoopFlags(subcommand, rest) {
-  const options = { phase: null, phaseDir: null, reqIds: null, files: null, raw: false };
+  const options = { phase: null, phaseDir: null, reqIds: null, files: null, raw: false, noCache: false };
   const usageText = `Usage: standing-orders ${subcommand} (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]`;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -276,6 +279,10 @@ function parseLoopFlags(subcommand, rest) {
     }
     if (a === '--raw') {
       options.raw = true;
+      continue;
+    }
+    if (a === '--no-cache' && subcommand === 'enforce') {
+      options.noCache = true;
       continue;
     }
     if (!VALUE_FLAGS.has(a)) return { usage: `${FAMILY} ${subcommand}: unknown flag ${JSON.stringify(a)}. ${usageText}` };
@@ -398,6 +405,7 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
     phaseDir,
     phaseRel,
     reqIds,
+    noCache: options.noCache === true,
     loadedOrders,
     inputs,
     files: selection.files,
@@ -484,18 +492,32 @@ function writeCoverageOutputs({ ev, put }) {
   put(ev.verdictRel, verdictText(ev, ev.cov.status, 'coverage'));
 }
 
+const orderHasMutants = (order) => Array.isArray(order.check_mutants) && order.check_mutants.length > 0;
+
+/** The code component of the mutant cache key (the HEAD tree id), or null when no cache may be used this run. */
+const resolveCodeId = ({ root, io }) => mutantsLib.resolveCodeId({ root, io, timeoutMs: GIT_TIMEOUT_MS });
+
 /**
  * Run the host prover for every applicable `test` order. An unusable ORDERS.yaml
  * runs nothing and reports `error`; no applicable test order reports `clear`.
  */
 function evaluateEnforce({ ev, root, io }) {
   const state = ev.loadedOrders.orders.state;
-  if (state === 'invalid' || state === 'unreadable') return { status: STATUS.ERROR, results: [], reasons: [] };
-  const results = ev.applicable
-    .filter((o) => o.verification === 'test')
-    .map((order) => runEnforcement({ order, cwd: root, env: io.env, argv: io.argv, deps: io }));
+  if (state === 'invalid' || state === 'unreadable') return { status: STATUS.ERROR, results: [], reasons: [], cache: null };
+  const tests = ev.applicable.filter((o) => o.verification === 'test');
+  // The code id (the HEAD tree) is resolved once, and only when some order has mutants; without one the cache is not used.
+  const code = tests.some(orderHasMutants) ? resolveCodeId({ root, io }) : null;
+  let entries = code === null ? {} : mutantsLib.readCache({ root, io });
+  let dirty = false;
+  const results = tests.map((order) => {
+    const base = runEnforcement({ order, cwd: root, env: io.env, argv: io.argv, deps: io });
+    const applied = mutantsLib.applyMutants({ order, base, root, io, entries, useCache: !ev.noCache, ts: io.now().toISOString(), code });
+    entries = applied.entries;
+    if (applied.changed) dirty = true;
+    return applied.result;
+  });
   const verdict = evaluateEnforcement({ results });
-  return { status: verdict.status, results, reasons: verdict.reasons };
+  return { status: verdict.status, results, reasons: verdict.reasons, cache: dirty ? entries : null };
 }
 
 /**
@@ -508,6 +530,7 @@ function runEnforce({ ev, root, io, put, rewriteVerdict }) {
   const enforced = evaluateEnforce({ ev, root, io });
   try {
     put(ENFORCEMENT_PATH, JSON.stringify({ schema: REPORT_SCHEMA, phase: ev.phaseRel, status: enforced.status, results: enforced.results }, null, 2) + '\n');
+    if (enforced.cache) put(mutantsLib.MUTANTS_PATH, mutantsLib.serializeCache(enforced.cache));
     put(ev.verdictRel, verdictText(ev, ev.coverageStatus, 'enforce', enforced.status, [...ev.reasons, ...enforced.reasons]));
   } catch (e) {
     rewriteVerdict(STATUS.ERROR);
@@ -619,14 +642,10 @@ function readTraceFile({ root, io }) {
  * project, oversized, unreadable or not an object. Any problem means "unenforced", never an error.
  */
 function readEnforcement({ root, io }) {
-  const abs = path.resolve(root, ENFORCEMENT_PATH);
+  const file = mutantsLib.readContained(root, ENFORCEMENT_PATH, io, MAX_ENFORCEMENT_BYTES);
+  if (file.error !== undefined) return null;
   try {
-    if (io.isSymlink(abs) || !io.exists(abs)) return null;
-    const realFile = io.realpath(abs);
-    if (!isInside(io.realpath(root), realFile)) return null;
-    const size = io.statSize(realFile);
-    if (typeof size !== 'number' || !(size <= MAX_ENFORCEMENT_BYTES)) return null;
-    const parsed = JSON.parse(String(io.readFile(abs)));
+    const parsed = JSON.parse(file.text);
     return isPlainObject(parsed) ? parsed : null;
   } catch (e) {
     return null;
@@ -1285,6 +1304,233 @@ function runSemanticCommand({ rest, cwd, raw, error, io }) {
   return result;
 }
 
+// ─── mutants ──────────────────────────────────────────────────────────────────
+
+const MUTANT_CODES = mutantsLib.MUTANT_CODES;
+const MAX_REPORTED_ORDER_ERRORS = 10;
+
+/** orders_unusable carrying the first validation errors (code, path, message), as `validate` reports them. */
+function ordersUnusable(errors) {
+  const listed = (Array.isArray(errors) ? errors : []).slice(0, MAX_REPORTED_ORDER_ERRORS).map(({ code, path: where, message }) => ({ code, path: where, message }));
+  const detail = listed.map((e) => `${e.code} ${e.path}: ${e.message}`).join('; ');
+  const message = 'ORDERS.yaml could not be used; run standing-orders validate' + (detail === '' ? '' : ` (${detail})`);
+  // A file-level cause (missing, unreadable, ...) is named in the message only: as an `errors` entry it would change the exit code.
+  const validation = listed.filter((e) => !FILE_ERROR_CODES.has(e.code));
+  return { code: LOOP_CODES.ORDERS_UNUSABLE, message, errors: [{ code: LOOP_CODES.ORDERS_UNUSABLE, message }, ...validation] };
+}
+
+/** The failure result for a `{ code, message, errors? }` refusal from ordersUnusable or loadTestOrder. */
+const refusal = (fail, got) => fail(got.code, got.message, got.errors === undefined ? undefined : { errors: got.errors });
+
+function loadTestOrder({ root, io, id }) {
+  const loaded = loadOrders({ cwd: root, fileArg: DEFAULT_ORDERS_PATH, deps: io });
+  if (loaded.stage !== 'ok') return ordersUnusable(loaded.report.errors);
+  const order = loaded.document.orders.find((candidate) => candidate.id === id);
+  if (order === undefined) return { code: MUTANT_CODES.ORDER_NOT_FOUND, message: `no order with id ${id}` };
+  if (order.verification !== 'test') return { code: MUTANT_CODES.ORDER_NOT_TEST, message: `${id} is not a test-tier order` };
+  return { order };
+}
+
+/** `mutants --order <id>`: read-only list of the order's mutants with their cached outcome. */
+function runMutantsList({ id, root, rawOut, io, error }) {
+  const fail = (code, message, extra) => authoringFailure({ subcommand: 'mutants', code, message, rawOut, io, error, extra });
+  const got = loadTestOrder({ root, io, id });
+  if (got.code) return refusal(fail, got);
+  const order = got.order;
+  const code = orderHasMutants(order) ? resolveCodeId({ root, io }) : null;
+  const entries = code === null ? {} : mutantsLib.readCache({ root, io });
+  const texts = code === null ? null : mutantsLib.hashableTexts(order, root, io);
+  const mutants = order.check_mutants.map((p) => {
+    const abs = path.resolve(root, p);
+    let exists = false;
+    let cachedOutcome = null;
+    try {
+      exists = io.exists(abs) && io.isFile(abs);
+      const file = mutantsLib.readMutant(root, p, io);
+      if (file.error === undefined && texts !== null) {
+        const key = mutantsLib.cacheKeyFor(order, { target: texts.target, clean: texts.clean, mutant: file.text }, code);
+        if (entries[key]) cachedOutcome = entries[key].outcome;
+      }
+    } catch (e) {
+      // listed as it is
+    }
+    return { path: p, exists, cached_outcome: cachedOutcome };
+  });
+  const result = { schema: REPORT_SCHEMA, subcommand: 'mutants', ok: true, disabled: false, mode: 'list', order: id, mutants, written: [] };
+  if (rawOut) io.log(JSON.stringify(result));
+  else {
+    io.log(`standing-orders mutants: ${id} - ${mutants.length} mutant(s)`);
+    for (const m of mutants) io.log(`  ${m.path}: ${m.exists ? 'present' : 'missing'}, ${m.cached_outcome === null ? 'not cached' : m.cached_outcome}`);
+  }
+  return result;
+}
+
+/** `mutants --run --order <id>`: the base proof plus every mutant, through the same function `enforce` uses. */
+function runMutantsRun({ id, noCache, root, rawOut, io, error }) {
+  const fail = (code, message, extra) => authoringFailure({ subcommand: 'mutants', code, message, rawOut, io, error, extra });
+  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
+  if (!config.enabled) return disabledResult({ subcommand: 'mutants', rawOut, io });
+  const got = loadTestOrder({ root, io, id });
+  if (got.code) return refusal(fail, got);
+  const order = got.order;
+  const base = runEnforcement({ order, cwd: root, env: io.env, argv: io.argv, deps: io });
+  const code = orderHasMutants(order) ? resolveCodeId({ root, io }) : null;
+  const entries = code === null ? {} : mutantsLib.readCache({ root, io });
+  const applied = mutantsLib.applyMutants({ order, base, root, io, entries, useCache: !noCache, ts: io.now().toISOString(), code });
+  const written = [];
+  if (applied.changed) {
+    const unusable = prepareOutputDir({ subcommand: 'mutants', root, io });
+    if (unusable !== null) return fail(unusable.code, unusable.message);
+    try {
+      writeAtomic(io, path.resolve(root, mutantsLib.MUTANTS_PATH), mutantsLib.serializeCache(applied.entries), 0);
+      written.push(mutantsLib.MUTANTS_PATH);
+    } catch (e) {
+      return fail(LOOP_CODES.WRITE_FAILED, `mutants: could not write ${mutantsLib.MUTANTS_PATH}: ${errMessage(e)}`);
+    }
+  }
+  const r = applied.result;
+  const result = {
+    schema: REPORT_SCHEMA,
+    subcommand: 'mutants',
+    ok: true,
+    disabled: false,
+    mode: 'run',
+    order: id,
+    base: { status: base.status, flagged: base.flagged, reason: base.reason },
+    mutants: Array.isArray(r.mutants) ? r.mutants : [],
+    verdict: r.flagged === false && r.status === 'green' ? 'clear' : 'flagged',
+    written,
+  };
+  if (rawOut) io.log(JSON.stringify(result));
+  else {
+    io.log(`standing-orders mutants: ${id} - ${result.verdict}`);
+    for (const m of result.mutants) io.log(`  ${m.path}: ${m.outcome}${m.cached ? ' (cached)' : ''}`);
+  }
+  return result;
+}
+
+/** The refusal for an existing mutant file that readContained rejected, by why it was rejected. */
+function existingMutantRefusal(mutantPath, file) {
+  if (file.kind === 'missing') return { code: MUTANT_CODES.MUTANT_MISSING, message: `${mutantPath} does not exist; give "content" to create it` };
+  if (file.kind === 'outside' || file.kind === 'symlink') return { code: MUTANT_CODES.PATH_OUTSIDE_PROJECT, message: file.error };
+  return { code: MUTANT_CODES.CONTENT_INVALID, message: file.error };
+}
+
+/**
+ * The disk checks of `mutants --add` before anything is written: the nearest existing ancestor really is inside the
+ * project; with `content` the file must not exist and the content must fit; without it the file must already exist
+ * and pass readContained (regular, not a link, inside the project, 1..MAX_MUTANT_BYTES). { code, message } or null.
+ */
+function mutantFileProblem({ root, io, abs, mutantPath, content }) {
+  try {
+    // The nearest existing ancestor (a dangling link counts as existing) must really be inside the project.
+    let dir = path.dirname(abs);
+    while (!io.exists(dir) && !io.isSymlink(dir) && dir !== path.dirname(dir)) dir = path.dirname(dir);
+    const realRoot = io.realpath(root);
+    const realDir = io.realpath(dir);
+    if (realDir !== realRoot && !mutantsLib.isInside(realRoot, realDir)) return { code: MUTANT_CODES.PATH_OUTSIDE_PROJECT, message: `${mutantPath} resolves (through a link) outside the project` };
+    if (content === undefined) {
+      const existing = mutantsLib.readContained(root, mutantPath, io, mutantsLib.MAX_MUTANT_BYTES);
+      if (existing.error !== undefined) return existingMutantRefusal(mutantPath, existing);
+      return existing.text === '' ? { code: MUTANT_CODES.CONTENT_INVALID, message: `${mutantPath} is empty` } : null;
+    }
+    if (io.exists(abs) || io.isSymlink(abs)) return { code: MUTANT_CODES.MUTANT_EXISTS, message: `${mutantPath} already exists` };
+  } catch (e) {
+    return { code: LOOP_CODES.WRITE_FAILED, message: `mutants: could not examine ${mutantPath}: ${errMessage(e)}` };
+  }
+  const size = Buffer.byteLength(content, 'utf8');
+  if (size === 0 || size > mutantsLib.MAX_MUTANT_BYTES) return { code: MUTANT_CODES.CONTENT_INVALID, message: `content must be 1 to ${mutantsLib.MAX_MUTANT_BYTES} bytes (got ${size})` };
+  return null;
+}
+
+/**
+ * `mutants --add <json>`: `{ order, path }` registers an existing mutant file, `{ order, path, content }` creates
+ * it. Validate everything and build the new ORDERS.yaml text in memory first; then write the mutant file (only when
+ * created), then ORDERS.yaml atomically; on an ORDERS.yaml write failure remove a file this call created.
+ */
+function runMutantsAdd({ json, root, rawOut, io, error }) {
+  const fail = (code, message, extra) => authoringFailure({ subcommand: 'mutants', code, message, rawOut, io, error, extra });
+  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
+  if (!config.enabled) return disabledResult({ subcommand: 'mutants', rawOut, io });
+  let body;
+  try {
+    body = JSON.parse(json);
+  } catch (e) {
+    return fail(LOOP_CODES.USAGE, `mutants --add: the argument is not valid JSON: ${errMessage(e)}`);
+  }
+  if (Array.isArray(body)) return fail('batch_refused', 'mutants adds exactly one mutant per call; --add must be one object, not a list');
+  const shapeOk = isPlainObject(body) && typeof body.order === 'string' && typeof body.path === 'string' && body.order !== '' && body.path !== '' && (body.content === undefined || typeof body.content === 'string');
+  if (!shapeOk) return fail(LOOP_CODES.USAGE, 'mutants --add: give one object {"order": <id>, "path": <project path>, "content": <text, optional>}');
+  const { order: id, path: given, content } = body;
+  const current = readOrdersForWrite({ root, io });
+  if (current.failure !== undefined) return fail(LOOP_CODES.ORDERS_UNUSABLE, current.failure.message);
+  if (current.text === null) return fail(LOOP_CODES.ORDERS_UNUSABLE, 'ORDERS.yaml does not exist');
+  const before = parseOrders(current.text);
+  if (!before.ok) return refusal(fail, ordersUnusable(before.errors));
+
+  const validated = mutantsLib.validateMutantAdd({ parsed: before, id, path: given });
+  if (validated.failure !== undefined) return fail(validated.failure.code, validated.failure.message);
+  const mutantPath = validated.path;
+  const abs = path.resolve(root, mutantPath);
+  if (!mutantsLib.isInside(root, abs)) return fail(MUTANT_CODES.PATH_OUTSIDE_PROJECT, `${given} resolves outside the project`);
+  const problem = mutantFileProblem({ root, io, abs, mutantPath, content });
+  if (problem !== null) return fail(problem.code, problem.message);
+
+  const planned = mutantsLib.planMutantAdd({ text: current.text, parsed: before, id, mutantPath, maxBytes: MAX_FILE_BYTES });
+  if (planned.failure !== undefined) {
+    const { code, message, extra } = planned.failure;
+    return fail(code, message, extra !== undefined && content !== undefined ? { ...extra, content } : extra);
+  }
+
+  const created = content !== undefined;
+  if (created) {
+    try {
+      io.mkdir(path.dirname(abs));
+      io.writeFile(abs, content);
+    } catch (e) {
+      return fail(LOOP_CODES.WRITE_FAILED, `mutants: could not write ${mutantPath}: ${errMessage(e)}`);
+    }
+  }
+  try {
+    writeAtomic(io, path.resolve(root, DEFAULT_ORDERS_PATH), planned.plan.text, 0);
+  } catch (e) {
+    let note = '';
+    if (created) {
+      try {
+        io.unlink(abs);
+      } catch (u) {
+        note = `; ${mutantPath} could not be removed: ${errMessage(u)}`;
+      }
+    }
+    return fail(LOOP_CODES.WRITE_FAILED, `mutants: could not write ${toSlashes(DEFAULT_ORDERS_PATH)}: ${errMessage(e)}${note}`);
+  }
+  const written = created ? [mutantPath, DEFAULT_ORDERS_PATH] : [DEFAULT_ORDERS_PATH];
+  const result = { schema: REPORT_SCHEMA, subcommand: 'mutants', ok: true, disabled: false, mode: 'add', order: id, path: mutantPath, created, written };
+  io.log(rawOut ? JSON.stringify(result) : `standing-orders mutants: added ${mutantPath} to ${id}; run standing-orders mutants --run --order ${id}`);
+  return result;
+}
+
+function runMutantsCommand({ rest, cwd, raw, error, io }) {
+  const usageText = 'Usage: standing-orders mutants --order <id> | --add <json> | --run --order <id> [--no-cache] [--raw]';
+  const rawOut = raw === true || rest.includes('--raw');
+  const usage = (message) => authoringFailure({ subcommand: 'mutants', code: LOOP_CODES.USAGE, message, rawOut, io, error });
+  const parsed = parseAuthoringFlags('mutants', rest, { valued: ['--add', '--order', '--ws'], bare: ['--run', '--no-cache'], usageText });
+  if (parsed.usage !== undefined) return usage(parsed.usage);
+  const { values, flags, adds } = parsed;
+  const run = flags.has('--run');
+  const id = values['--order'];
+  const root = path.resolve(cwd);
+  if (adds > 0) {
+    if (run || id !== undefined || flags.has('--no-cache')) return usage(`${FAMILY} mutants: --add takes no other flag. ${usageText}`);
+    if (adds > 1) return authoringFailure({ subcommand: 'mutants', code: 'batch_refused', message: 'mutants adds exactly one mutant per call; --add was given more than once', rawOut, io, error });
+    return runMutantsAdd({ json: values['--add'], root, rawOut, io, error });
+  }
+  if (id === undefined) return usage(`${FAMILY} mutants: give --order <id> (or --add <json>). ${usageText}`);
+  if (flags.has('--no-cache') && !run) return usage(`${FAMILY} mutants: --no-cache needs --run. ${usageText}`);
+  if (run) return runMutantsRun({ id, noCache: flags.has('--no-cache'), root, rawOut, io, error });
+  return runMutantsList({ id, root, rawOut, io, error });
+}
+
 function humanLines(report) {
   const verdict = report.ok ? 'OK' : 'INVALID';
   const s = report.summary;
@@ -1309,6 +1555,7 @@ function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = fals
     if (LOOP_SUBCOMMANDS.includes(subcommand)) run = runLoopCommand;
     else if (subcommand === 'promote') run = runPromoteCommand;
     else if (subcommand === 'semantic') run = runSemanticCommand;
+    else if (subcommand === 'mutants') run = runMutantsCommand;
     try {
       return run({ subcommand, rest: args.slice(2), cwd, raw, error, io });
     } catch (e) {
@@ -1352,7 +1599,7 @@ function isUsageFailure(report) {
 /** Exit code for the direct CLI: 0 ok; 2 the file could not be read; 1 otherwise (`stale`: 1 when any order is stale). */
 function exitCodeFor(report) {
   if (AUTHORING_SUBCOMMANDS.includes(report.subcommand)) {
-    if (report.ok) return 0;
+    if (report.ok) return report.verdict === 'flagged' ? 1 : 0;
     return Array.isArray(report.errors) && report.errors.some((e) => FILE_ERROR_CODES.has(e.code)) ? 2 : 1;
   }
   if (QUERY_SUBCOMMANDS.includes(report.subcommand)) {

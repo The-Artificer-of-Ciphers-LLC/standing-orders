@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseOrders, effectiveLeaves, KINDS, VERIFICATIONS, CHECK_KINDS, UNIVERSAL_CONTEXT } = require('../lib/orders.cjs');
+const { parseOrders, effectiveLeaves, KINDS, VERIFICATIONS, CHECK_KINDS, UNIVERSAL_CONTEXT, ERROR_CODES, ORDER_KEYS } = require('../lib/orders.cjs');
 const { ADR_EXAMPLE, doc, order, testOrder, variant, codes } = require('./helpers/fixtures.cjs');
 
 describe('parseOrders — happy path', () => {
@@ -367,16 +367,18 @@ describe('parseOrders — orders', () => {
   });
 
   it('warnsPerMissingFixture', () => {
+    // phase 6 adds the separate `no_mutants` warning for a test order without mutants: this test is about fixtures only
+    const fixtureWarnings = (r) => r.warnings.filter((w) => w.code === 'fixture_missing');
     const none = parseOrders(doc({ orders: [testOrder({ check_violation_fixture: null, check_clean_fixture: null })] }));
     assert.equal(none.ok, true);
-    assert.deepEqual(none.warnings.map((w) => [w.code, w.path]).sort(), [
+    assert.deepEqual(fixtureWarnings(none).map((w) => [w.code, w.path]).sort(), [
       ['fixture_missing', '$.orders[0].check_clean_fixture'],
       ['fixture_missing', '$.orders[0].check_violation_fixture'],
     ]);
     const one = parseOrders(doc({ orders: [testOrder({ check_clean_fixture: null })] }));
-    assert.deepEqual(one.warnings.map((w) => w.path), ['$.orders[0].check_clean_fixture']);
+    assert.deepEqual(fixtureWarnings(one).map((w) => w.path), ['$.orders[0].check_clean_fixture']);
     const both = parseOrders(doc({ orders: [testOrder()] }));
-    assert.deepEqual(both.warnings, []);
+    assert.deepEqual(fixtureWarnings(both), []);
   });
 
   it('warnsWhenBackstopCarriesCheckKeys', () => {
@@ -427,5 +429,168 @@ describe('parseOrders — orders', () => {
     const r = parseOrders('version: "1"\nversion: "2"\nx: &x [a, b]\ny: *x\n');
     assert.equal(r.ok, false);
     assert.deepEqual(codes(r.errors), ['yaml_anchor_refused']);
+  });
+});
+
+// Phase 6 (#7), ADR-0002 section 1: the `check_mutants` field. Rows 1-11 of .gsd/phase/feat-7-mutation-hardening/50-test-matrix.md.
+describe('parseOrders: check_mutants', () => {
+  const P0 = '$.orders[0]';
+  const at = (i) => `${P0}.check_mutants[${i}]`;
+  const pairs = (list) => list.map((x) => [x.code, x.path]);
+  const withMutants = (mutants, extra = {}) => parseOrders(doc({ orders: [testOrder({ check_mutants: mutants, ...extra })] }));
+  /** An order document written by hand, so a value the dumper would normalize can be seen as the parser sees it. */
+  const raw = (lines) =>
+    [
+      'version: 1',
+      'orders:',
+      '  - id: T-1',
+      '    kind: prohibition',
+      '    statement: s',
+      '    verification: test',
+      '    check_kind: node-test',
+      '    check_target: tests/x.test.cjs',
+      '    check_violation_fixture: tests/fixtures/bad.js',
+      '    check_clean_fixture: tests/fixtures/good.js',
+      ...lines.map((l) => '    ' + l),
+      '',
+    ].join('\n');
+
+  it('exportsTheMutantCodes', () => {
+    assert.equal(ERROR_CODES.PATH_INVALID, 'path_invalid');
+    assert.equal(ERROR_CODES.DUPLICATE_MUTANT, 'duplicate_mutant');
+    assert.equal(ERROR_CODES.MUTANT_IS_CHECK_FILE, 'mutant_is_check_file');
+    assert.equal(ERROR_CODES.NO_MUTANTS, 'no_mutants');
+    assert.ok(ORDER_KEYS.includes('check_mutants'));
+  });
+
+  // row 1
+  it('noMutantsWarns', () => {
+    const r = parseOrders(doc({ orders: [testOrder()] }));
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(pairs(r.warnings), [['no_mutants', P0]]);
+    assert.deepEqual(r.document.orders[0].check_mutants, []);
+    const backstop = parseOrders(doc({ orders: [order()] }));
+    assert.deepEqual(backstop.warnings, [], 'hardening is for test orders: a backstop has nothing to harden');
+    assert.deepEqual(backstop.document.orders[0].check_mutants, []);
+    // hardening is opt-in: the order is as valid as it was
+    assert.equal(r.document.orders[0].id, 'TEST-1');
+  });
+
+  // row 2
+  it('acceptsCheckMutants', () => {
+    const r = withMutants(['tests/fixtures/mutants/b.js', 'tests/fixtures/mutants/a.js']);
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(r.warnings, [], 'a hardened test order has nothing to warn about');
+    assert.deepEqual(r.document.orders[0].check_mutants, ['tests/fixtures/mutants/b.js', 'tests/fixtures/mutants/a.js'], 'kept as written, in order');
+    const five = parseOrders(raw(['check_mutants:', '  - 5']));
+    assert.equal(five.ok, true, JSON.stringify(five.errors));
+    assert.deepEqual(five.document.orders[0].check_mutants, ['5'], 'every scalar stays a string');
+  });
+
+  // row 3
+  it('checkMutantsMustBeList', () => {
+    for (const lines of [['check_mutants: tests/m.js'], ['check_mutants: {a: b}'], ['check_mutants:'], ['check_mutants: ""']]) {
+      const r = parseOrders(raw(lines));
+      assert.equal(r.ok, false, lines.join('|'));
+      assert.deepEqual(pairs(r.errors), [['type_invalid', `${P0}.check_mutants`]], lines.join('|'));
+      assert.equal(r.document, null);
+    }
+  });
+
+  // row 4
+  it('mutantEntriesMustBeText', () => {
+    const cases = [
+      [['check_mutants:', '  - ""'], 0],
+      [['check_mutants:', '  - ok.js', '  - ""'], 1],
+      [['check_mutants:', '  - ok.js', '  - "   "'], 1],
+      [['check_mutants:', '  - ok.js', '  -'], 1],
+      [['check_mutants:', '  - {a: b}'], 0],
+      [['check_mutants:', '  - ok.js', '  - [x, y]'], 1],
+    ];
+    for (const [lines, index] of cases) {
+      const r = parseOrders(raw(lines));
+      assert.equal(r.ok, false, lines.join('|'));
+      assert.deepEqual(pairs(r.errors), [['type_invalid', at(index)]], lines.join('|'));
+    }
+  });
+
+  // row 5
+  it('mutantPathMustBeRelative', () => {
+    const hostile = ['/abs/m.js', '/', 'C:\\x\\m.js', 'c:/x/m.js', 'C:/x/m.js', '\\\\srv\\x\\m.js', 'a/../b.js', 'a\\..\\b.js', '..', '../m.js', 'a/..', './../x.js'];
+    for (const p of hostile) {
+      const r = withMutants(['fine.js', p]);
+      assert.equal(r.ok, false, p);
+      assert.deepEqual(pairs(r.errors), [['path_invalid', at(1)]], p);
+    }
+  });
+
+  // row 6
+  it('dotsInNamesAreFine', () => {
+    const fine = ['a..b/c.js', '..foo', 'dir/..foo/x.js', 'x/y..', 'a/.../b.js', '.hidden/m.js', './m.js'];
+    const r = withMutants(fine);
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(r.document.orders[0].check_mutants, fine);
+  });
+
+  // row 7
+  it('duplicateMutant', () => {
+    const cases = [
+      [['a/b.js', 'a/b.js'], 1],
+      [['a\\b.js', 'a/b.js'], 1],
+      [['a/b.js', 'x.js', 'a/b.js'], 2],
+    ];
+    for (const [list, index] of cases) {
+      const r = withMutants(list);
+      assert.equal(r.ok, false, list.join('|'));
+      assert.deepEqual(pairs(r.errors), [['duplicate_mutant', at(index)]], list.join('|'));
+    }
+  });
+
+  // row 8
+  it('mutantCannotBeCheckFile', () => {
+    const same = ['tests/x.test.cjs', 'tests/fixtures/bad.js', 'tests/fixtures/good.js', 'Tests/X.test.cjs', 'tests\\fixtures\\bad.js', 'TESTS/FIXTURES/GOOD.JS'];
+    for (const p of same) {
+      const r = withMutants([p]);
+      assert.equal(r.ok, false, p);
+      assert.deepEqual(pairs(r.errors), [['mutant_is_check_file', at(0)]], p);
+    }
+    const second = withMutants(['fine.js', 'tests/fixtures/good.js']);
+    assert.deepEqual(pairs(second.errors), [['mutant_is_check_file', at(1)]]);
+    const lint = withMutants(['src/refund.js'], { check_kind: 'lint-rule', check_rule: 'local/no-x', check_target: 'src/refund.js' });
+    assert.deepEqual(pairs(lint.errors), [['mutant_is_check_file', at(0)]], 'a lint-rule target is a check file too');
+    assert.equal(withMutants(['tests/fixtures/good.js.bak', 'tests/x.test.cjs.js']).ok, true, 'only an exact match is the check file');
+  });
+
+  // row 9
+  it('emptyListWarns', () => {
+    const r = withMutants([]);
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(pairs(r.warnings), [['no_mutants', P0]]);
+    assert.deepEqual(r.document.orders[0].check_mutants, []);
+  });
+
+  // row 10
+  it('backstopMutantsIgnored', () => {
+    const r = parseOrders(doc({ orders: [order({ verification: 'backstop', check_mutants: ['a.js'] })] }));
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    assert.deepEqual(pairs(r.warnings), [['check_ignored_for_backstop', `${P0}.check_mutants`]]);
+  });
+
+  // row 11
+  it('lintRuleMutants', () => {
+    const lint = withMutants(['tests/fixtures/mutants/lint-1.js'], { check_kind: 'lint-rule', check_rule: 'local/no-double-refund' });
+    assert.equal(lint.ok, true, JSON.stringify(lint.errors));
+    assert.deepEqual(lint.warnings, []);
+    assert.deepEqual(lint.document.orders[0].check_mutants, ['tests/fixtures/mutants/lint-1.js']);
+    // S11: a node-test order with mutants but no clean fixture adds no new requirement; the existing warning says it all
+    const noClean = withMutants(['m.js'], { check_clean_fixture: null });
+    assert.equal(noClean.ok, true, JSON.stringify(noClean.errors));
+    assert.deepEqual(pairs(noClean.warnings), [['fixture_missing', `${P0}.check_clean_fixture`]]);
+  });
+
+  it('mutantsOfOtherOrdersDoNotCollide', () => {
+    // the duplicate rule is per order: two orders may name the same mutant file
+    const r = parseOrders(doc({ orders: [testOrder({ id: 'T-1', check_mutants: ['m.js'] }), testOrder({ id: 'T-2', check_mutants: ['m.js'] })] }));
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
   });
 });

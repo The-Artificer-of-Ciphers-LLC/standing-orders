@@ -13,6 +13,7 @@ const SKILLS_DIR = path.join(ROOT, 'skills');
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'capability.json'), 'utf8'));
 const PROMOTE = 'standing-orders-promote';
 const REVIEW = 'standing-orders-conflict-review';
+const HARDEN = 'standing-orders-harden';
 
 function skillStems() {
   if (!fs.existsSync(SKILLS_DIR)) return [];
@@ -56,7 +57,7 @@ describe('skills: manifest and files agree', () => {
   it('manifestSkillsMatchFiles', () => {
     const stems = skillStems();
     assert.deepEqual([...MANIFEST.skills].sort(), stems, 'capability.json skills equals the directories under skills/ that hold a SKILL.md');
-    assert.deepEqual(stems, [REVIEW, PROMOTE].sort());
+    assert.deepEqual(stems, [REVIEW, PROMOTE, HARDEN].sort());
 
     for (const stem of stems) {
       const fm = frontmatter(skillText(stem));
@@ -134,15 +135,80 @@ describe('skills: the confirmation rules', () => {
 
   it('skillsRunOnlyTheStandingOrdersCommands', () => {
     const allowed = [
-      /^gsd_run standing-orders (promote|semantic|select|validate)\b/,
-      /^gsd-tools standing-orders (promote|semantic|select|validate)\b/,
+      /^gsd_run standing-orders (promote|semantic|select|validate|mutants)\b/,
+      /^gsd-tools standing-orders (promote|semantic|select|validate|mutants)\b/,
       /^gsd_run query check auto-mode --pick auto_chain_active$/,
       /^gsd-tools query check auto-mode --pick auto_chain_active$/,
     ];
-    for (const stem of [PROMOTE, REVIEW]) {
+    for (const stem of [PROMOTE, REVIEW, HARDEN]) {
       const commands = commandsIn(skillText(stem));
       assert.ok(commands.length > 0, `${stem} tells the agent to run something`);
       for (const c of commands) assert.ok(allowed.some((re) => re.test(c)), `${stem}: ${c} is not a standing-orders or auto-mode command`);
     }
+  });
+});
+
+// Phase 6 (#7), ADR-0002 section 4. Rows 53 (the harden skill), 54 (manifest) and the promote hand-off (K3).
+describe('skills: the harden skill', () => {
+  const PACKAGE = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+  // row 53
+  it('hardenSkillShipped', () => {
+    assert.ok(skillStems().includes(HARDEN), 'skills/standing-orders-harden/SKILL.md exists');
+    const text = skillText(HARDEN);
+    const fm = frontmatter(text);
+    assert.equal(fm.name, `gsd-${HARDEN}`);
+    assert.ok(fm.description.trim().length > 20);
+    assert.match(fm.description, /mutant/i);
+
+    assert.match(text, /up to three mutants/i, 'proposes a handful, not a flood');
+    assert.match(text, /equivalence argument/i, 'argues each mutant is not equivalent');
+    assert.match(text, /never add a mutant the user did not confirm/i, 'adds nothing unconfirmed');
+    assert.match(text, /own confirmation|one question per mutant|about that mutant only/i, 'one confirmation per mutant');
+    assert.match(text, /auto mode never adds a mutant/i, 'unattended runs add nothing');
+    assert.match(text, /check auto-mode --pick auto_chain_active/, 'detects auto mode the way the host does');
+    assert.match(text, /mutants --order/, 'reads the current state through the CLI');
+    assert.match(text, /mutants --add/, 'writes through the CLI');
+    assert.match(text, /mutants --run/, 'runs them');
+    assert.match(text, /batch_refused/, 'knows a list is refused');
+    assert.match(text, /Never edit ORDERS\.yaml/i, 'never edits the rules file itself');
+    assert.ok(text.indexOf('mutants --run') > text.indexOf('mutants --add'), 'the run comes after the adds');
+    assert.ok(text.lastIndexOf('mutants --run') > text.lastIndexOf('mutants --add'), 'the skill ends by running them');
+
+    // shell-safe (security review #7, major 3): code never travels on a command line; only {order, path}
+    // goes in single quotes, the id is restricted to a shell-inert alphabet, and every --order is single-quoted.
+    assert.ok(text.includes("--add '{\"order\":\"<id>\",\"path\":\"<path>\"}'"), 'the add argument is single-quoted {order, path} only');
+    assert.ok(!/--add '[^']*"content"/.test(text), 'no file content on the command line');
+    assert.ok(text.includes('^[A-Za-z0-9._-]+$'), 'the order id is restricted before it reaches a shell');
+    assert.ok(!/--order "/.test(text), 'the order id is never double-quoted (no $ or backtick expansion)');
+    assert.ok(text.includes("--order '<order id>'"), 'the order id is single-quoted');
+    assert.match(text, /file-writing tool/i, 'the mutant is written with a file tool, not the shell');
+    for (const code of ['path_invalid', 'path_outside_project', 'path_reserved', 'mutant_is_check_file', 'mutant_missing', 'content_invalid', 'order_not_test', 'manual']) {
+      assert.ok(text.includes(code), `the skill knows the refusal ${code}`);
+    }
+  });
+
+  // K3
+  it('promoteSkillOffersHardening', () => {
+    const promote = skillText(PROMOTE);
+    assert.match(promote, /offer the `?gsd-standing-orders-harden`? skill/i, 'after adding a test order, the promotion skill offers it');
+    assert.match(promote, /\btest\b[^.]*\bgsd-standing-orders-harden/i, 'and only for test orders');
+  });
+
+  // row 54, K2
+  it('manifestPhase6', () => {
+    assert.equal(MANIFEST.version, '0.6.0');
+    assert.equal(PACKAGE.version, '0.6.0');
+    assert.deepEqual(MANIFEST.skills, [PROMOTE, REVIEW, HARDEN]);
+    assert.deepEqual(MANIFEST.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
+    // no new loop wiring: the same five steps, five gates and one contribution, none of them naming the new skill or command
+    assert.equal(MANIFEST.steps.length, 5);
+    assert.equal(MANIFEST.gates.length, 5);
+    assert.equal(MANIFEST.contributions.length, 1);
+    for (const hook of [...MANIFEST.steps, ...MANIFEST.gates, ...MANIFEST.contributions]) {
+      assert.ok(!JSON.stringify(hook).includes(HARDEN), 'the harden skill is run by hand, not wired to a loop point');
+      assert.ok(!JSON.stringify(hook).includes('standing-orders mutants'), 'the mutants command is not a loop step');
+    }
+    assert.deepEqual(MANIFEST.steps.map((s) => s.point), ['discuss:post', 'plan:pre', 'plan:post', 'execute:wave:post', 'ship:pre']);
   });
 });

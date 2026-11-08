@@ -63,7 +63,7 @@ const noWrites = (m) => {
 
 describe('router loop subcommands', () => {
   it('exportsTheSubcommandTable', () => {
-    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
+    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
     assert.equal(APPLICABLE_PATH, '.planning/standing-orders/APPLICABLE.md');
     assert.equal(CONFLICTS_PATH, '.planning/standing-orders/CONFLICTS.json');
     assert.equal(ENFORCEMENT_PATH, '.planning/standing-orders/ENFORCEMENT.json');
@@ -1048,5 +1048,232 @@ describe('router select and the trace ledger', () => {
     assert.deepEqual(r.applicable, ['__proto__']);
     assert.deepEqual(r.stale, ['__proto__']);
     assert.match(sectionOf(m.read(APPLICABLE_PATH), '__proto__'), /- Stale: changed since last traced in /);
+  });
+});
+
+// Phase 6 (#7), ADR-0002 sections 2-3: `enforce` runs a test order's mutants once its base check is proven, caches the
+// answers by content, and flags the order when a mutant survives. Rows 16, 23-25, 30-31 of the phase-6 test matrix.
+const { fakeProver } = require('./helpers/prover.cjs');
+
+describe('router enforce: mutants', () => {
+  const MUTANTS = '.planning/standing-orders/MUTANTS.json';
+  const CHECK_A = 'tests/a.test.cjs';
+  const BAD = 'tests/fixtures/bad.js';
+  const MUT = 'tests/fixtures/mutants';
+  const MA1 = `${MUT}/m1.js`;
+  const MA2 = `${MUT}/m2.js`;
+  const FILES = { [CHECK_A]: 'check a', [BAD]: 'bad', 'tests/fixtures/good.js': 'good', [MA1]: 'mutant one', [MA2]: 'mutant two' };
+  const withMutants = (list) => testOrder({ id: 'T-A', statement: 'Never A.', scope: SCOPE_BILLING, check_target: CHECK_A, check_mutants: list });
+  const PLAN_A = planText({ prohibitions: [testProjection('T-A', CHECK_A)] });
+  const abs = (m, rel) => path.resolve(m.cwd, rel);
+
+  function setupMutants({ orders = doc({ orders: [withMutants([MA1, MA2])] }), plan = PLAN_A, table = {}, files = {}, drop = [], overrides = {}, config } = {}) {
+    const prover = fakeProver(table);
+    const all = { [HOST_CLI]: '// host stub\n', [PLAN]: plan, ...FILES, ...files };
+    for (const rel of drop) delete all[rel];
+    const opts = { orders, files: all, overrides: { execFile: prover.execFile, argv: ['node', HOST_CLI], ...overrides } };
+    if (config !== undefined) opts.config = config;
+    return { m: setup(opts), prover };
+  }
+  const report = (m) => JSON.parse(m.read(ENFORCEMENT_PATH));
+  const cacheOutcomes = (m) => Object.values(JSON.parse(m.read(MUTANTS)).entries).map((e) => e.outcome).sort();
+  const fixturesOf = (prover) => prover.calls.map((c) => c.fixture);
+
+  // row 30: an order without mutants leaves no trace of the feature
+  const unchangedFor = (ordersList) => () => {
+    for (const orders of ordersList) {
+      const prover = fakeProver();
+      const m = setup({ orders, files: { [HOST_CLI]: '// host stub\n', [PLAN]: PLAN_AB }, overrides: { execFile: prover.execFile, argv: ['node', HOST_CLI] } });
+      const r = run(m, 'enforce');
+      assert.equal(r.enforcement, 'clear');
+      assert.equal(prover.calls.length, 2, 'one prover call per order, none for mutants');
+      assert.equal(m.has(MUTANTS), false, 'a project with no mutants gets no MUTANTS.json');
+      assert.ok(!m.calls.readFile.some((p) => p.endsWith('MUTANTS.json')), 'and none is read');
+      assert.ok(!r.written.includes(MUTANTS));
+      const entry = (id) => ({ id, status: 'green', flagged: false, reason: 'ok', located: true, kind: 'node-test', evidence: [] });
+      assert.deepEqual(report(m), { schema: 1, phase: PHASE, status: 'clear', results: [entry('T-A'), entry('T-B')] }, 'ENFORCEMENT.json is exactly what phase 5 wrote');
+      assert.deepEqual(r.results, [entry('T-A'), entry('T-B')]);
+    }
+  };
+  it('enforceWithoutMutantsUnchanged', unchangedFor([ENFORCE_ORDERS]));
+  it('enforceEmptyMutantListUnchanged', unchangedFor([doc({ orders: [{ ...T_B, check_mutants: [] }, { ...T_A, check_mutants: [] }] })]));
+
+  it('enforceMutantsAllKilled', () => {
+    const { m, prover } = setupMutants();
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.enforcement, 'clear');
+    assert.equal(exitCodeFor(r), 0);
+    assert.deepEqual(fixturesOf(prover), [BAD, MA1, MA2], 'the base check first, then each mutant as the violation fixture');
+    const expected = [
+      { path: MA1, outcome: 'killed', cached: false, reason: 'ok' },
+      { path: MA2, outcome: 'killed', cached: false, reason: 'ok' },
+    ];
+    assert.deepEqual(report(m).results[0].mutants, expected);
+    assert.deepEqual(r.results[0].mutants, expected);
+    assert.equal(report(m).results[0].flagged, false);
+    assert.equal(report(m).status, 'clear');
+    assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
+    assert.deepEqual(cacheOutcomes(m), ['killed', 'killed']);
+    assert.ok(r.written.includes(MUTANTS));
+    assert.ok(m.calls.rename.some(([, to]) => to === abs(m, MUTANTS)), 'the cache is replaced atomically');
+    assert.ok(!m.calls.writeFile.includes(abs(m, MUTANTS)), 'never written in place');
+  });
+
+  // row 31
+  it('enforceMutantSurvivorFlags', () => {
+    const { m, prover } = setupMutants({ table: { [MA2]: FLAGGED } });
+    const writes = [];
+    const realWrite = m.deps.writeFile;
+    m.deps.writeFile = (p, text) => {
+      writes.push(path.basename(p).split('.tmp-')[0]);
+      return realWrite(p, text);
+    };
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.enforcement, 'flagged', 'a survivor flags the order and the blocking gate rejects it');
+    assert.equal(exitCodeFor(r), 1);
+    assert.ok(lineSet(m, VERDICT).has('enforcement: flagged'));
+    assert.ok(!lineSet(m, VERDICT).has('enforcement: clear'));
+    assert.ok(m.read(VERDICT).includes(`enforcement_flagged: T-A: mutant_survived: ${MA2}`), m.read(VERDICT));
+    assert.ok(r.reasons.some((x) => x.code === 'enforcement_flagged' && x.message === `T-A: mutant_survived: ${MA2}`), JSON.stringify(r.reasons));
+    const entry = report(m).results[0];
+    assert.equal(report(m).status, 'flagged');
+    assert.equal(entry.status, 'green', 'the base check stays proven; only the mutant outcome flags it');
+    assert.equal(entry.flagged, true);
+    assert.equal(entry.reason, `mutant_survived: ${MA2}`);
+    assert.deepEqual(entry.mutants.map((x) => [x.path, x.outcome, x.cached]), [[MA1, 'killed', false], [MA2, 'survived', false]]);
+    assert.equal(entry.mutants[1].reason, 'test-tier prohibition has no passing wired enforcement check');
+    assert.deepEqual(cacheOutcomes(m), ['killed', 'survived']);
+    assert.equal(fixturesOf(prover).length, 3);
+    assert.equal(writes[0], 'STANDING-ORDERS.md', 'the pending verdict still goes first');
+    assert.ok(writes.includes('ENFORCEMENT.json') && writes.includes('MUTANTS.json'));
+  });
+
+  it('enforceMutantsOnlyForOrdersThatHaveThem', () => {
+    const orders = doc({ orders: [T_B, withMutants([MA1, MA2])] });
+    const plan = planText({ prohibitions: [testProjection('T-A', CHECK_A), testProjection('T-B', 'tests/b.test.cjs')] });
+    const { m, prover } = setupMutants({ orders, plan, table: { [MA1]: FLAGGED }, files: { 'tests/b.test.cjs': 'check b' } });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.equal(prover.calls.filter((c) => c.id === 'T-B').length, 1, 'T-B has no mutants: one call');
+    assert.equal(prover.calls.filter((c) => c.id === 'T-A').length, 3, 'T-A: its base and its two mutants');
+    const [a, b] = report(m).results;
+    assert.deepEqual([a.id, a.flagged], ['T-A', true]);
+    assert.deepEqual([b.id, b.flagged], ['T-B', false]);
+    assert.equal('mutants' in b, false);
+    assert.equal(r.reasons.filter((x) => x.code === 'enforcement_flagged').length, 1);
+  });
+
+  // row 16
+  it('enforceBaseFlaggedSkipsMutants', () => {
+    const { m, prover } = setupMutants({ table: { [BAD]: FLAGGED } });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.deepEqual(fixturesOf(prover), [BAD], 'a check that is not proven is not run against mutants');
+    const entry = report(m).results[0];
+    assert.equal(entry.reason, 'test-tier prohibition has no passing wired enforcement check', 'the host reason is untouched');
+    assert.equal('mutants' in entry, false);
+    assert.equal(m.has(MUTANTS), false);
+  });
+
+  // row 23
+  it('enforceCacheHitSecondRun', () => {
+    const { m, prover } = setupMutants({ table: { [MA2]: FLAGGED } });
+    const first = run(m, 'enforce');
+    assert.equal(prover.calls.length, 3);
+    const cacheText = m.read(MUTANTS);
+    const second = run(m, 'enforce');
+    assert.deepEqual(fixturesOf(prover).slice(3), [BAD], 'the second run asks the host about the base check only');
+    assert.equal(second.enforcement, 'flagged', 'a cached survivor still flags the order');
+    assert.deepEqual(report(m).results[0].mutants.map((x) => [x.path, x.outcome, x.cached]), [[MA1, 'killed', true], [MA2, 'survived', true]]);
+    assert.equal(report(m).results[0].reason, `mutant_survived: ${MA2}`);
+    assert.equal(m.read(MUTANTS), cacheText, 'nothing new to remember: the cache is not rewritten');
+    assert.ok(!second.written.includes(MUTANTS));
+    assert.ok(first.written.includes(MUTANTS));
+  });
+
+  // row 24 end to end
+  it('enforceEditInvalidatesCache', () => {
+    const { m, prover } = setupMutants();
+    run(m, 'enforce');
+    m.deps.writeFile(abs(m, MA1), 'mutant one, edited');
+    prover.calls.length = 0;
+    run(m, 'enforce');
+    assert.deepEqual(fixturesOf(prover), [BAD, MA1], 'only the edited mutant runs again');
+    assert.deepEqual(report(m).results[0].mutants.map((x) => [x.path, x.cached]), [[MA1, false], [MA2, true]]);
+
+    prover.calls.length = 0;
+    m.deps.writeFile(abs(m, CHECK_A), 'check a, edited');
+    run(m, 'enforce');
+    assert.deepEqual(fixturesOf(prover), [BAD, MA1, MA2], 'a changed check re-runs every mutant');
+  });
+
+  // row 25
+  it('enforceNoCacheFlag', () => {
+    const table = { [MA2]: FLAGGED };
+    const { m, prover } = setupMutants({ table });
+    run(m, 'enforce');
+    delete table[MA2]; // the host now says MA2 is killed
+    // the stored answer wins until the cache is bypassed: that is what --no-cache is for
+    const stale = run(m, 'enforce');
+    assert.equal(stale.enforcement, 'flagged');
+    prover.calls.length = 0;
+    const fresh = run(m, 'enforce', [...PHASE_FLAG, '--no-cache']);
+    assert.equal(fresh.ok, true, JSON.stringify(fresh));
+    assert.deepEqual(fixturesOf(prover), [BAD, MA1, MA2], 'every mutant runs again');
+    assert.equal(fresh.enforcement, 'clear', 'the fresh answer replaces the stored survivor');
+    assert.deepEqual(report(m).results[0].mutants.map((x) => [x.outcome, x.cached]), [['killed', false], ['killed', false]]);
+    assert.deepEqual(cacheOutcomes(m), ['killed', 'killed'], 'and is written back');
+    assert.ok(fresh.written.includes(MUTANTS));
+    // and the next ordinary run trusts the refreshed cache
+    prover.calls.length = 0;
+    assert.equal(run(m, 'enforce').enforcement, 'clear');
+    assert.deepEqual(fixturesOf(prover), [BAD]);
+  });
+
+  it('enforceMissingMutantFlags', () => {
+    const { m, prover } = setupMutants({ drop: [MA2] });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.deepEqual(fixturesOf(prover), [BAD, MA1], 'no prover call for a file that is not there');
+    const entry = report(m).results[0];
+    assert.equal(entry.reason, `mutant_unverified: ${MA2}`);
+    assert.equal(entry.mutants[1].outcome, 'error');
+    assert.ok(entry.mutants[1].reason.startsWith('mutant_missing'), entry.mutants[1].reason);
+    assert.deepEqual(cacheOutcomes(m), ['killed'], 'an error is never remembered');
+    assert.ok(m.read(VERDICT).includes(`enforcement_flagged: T-A: mutant_unverified: ${MA2}`));
+  });
+
+  it('enforceHostErrorOnMutantFlagsAndIsNotCached', () => {
+    const { m } = setupMutants({ table: { [MA1]: new Error('spawn failed') } });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.equal(report(m).results[0].reason, `mutant_unverified: ${MA1}`);
+    assert.deepEqual(cacheOutcomes(m), ['killed']);
+  });
+
+  it('enforceDisabledWithMutantsReadsNothing', () => {
+    const { m, prover } = setupMutants({ config: null });
+    const r = run(m, 'enforce');
+    assert.equal(r.disabled, true);
+    assert.deepEqual(r.written, []);
+    noWrites(m);
+    for (const p of m.calls.readFile) assert.ok(p.endsWith('config.json'), p);
+    assert.equal(prover.calls.length, 0);
+  });
+
+  it('invalidMutantPathBlocksTheLoop', () => {
+    for (const bad of ['../outside.js', '/etc/passwd', MA1]) {
+      const orders = doc({ orders: [withMutants(bad === MA1 ? [MA1, MA1] : [bad])] });
+      const sel = setupMutants({ orders });
+      const s = run(sel.m, 'select');
+      assert.equal(s.conflicts, 'blocked', bad);
+      assert.ok(s.reasons.some((x) => x.code === 'orders_invalid'), bad);
+      const enf = setupMutants({ orders });
+      const e = run(enf.m, 'enforce');
+      assert.equal(e.enforcement, 'error', bad);
+      assert.equal(enf.prover.calls.length, 0, 'nothing runs against an order file that does not validate');
+    }
   });
 });
