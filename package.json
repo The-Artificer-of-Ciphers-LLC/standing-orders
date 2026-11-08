@@ -1,6 +1,6 @@
 {
   "name": "standing-orders",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "GSD third-party capability: project-wide, context-scoped business rules with conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
   "license": "MIT",
   "type": "commonjs",

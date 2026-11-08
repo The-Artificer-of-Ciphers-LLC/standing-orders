@@ -80,9 +80,10 @@ An order's **effective contexts** are the union of its named contexts' leaf sets
 | `check_kind`, `check_target` | `test`: yes | The mechanical check, using gsd-core's field names so an order projects into a `must_haves.prohibitions` item unchanged. |
 | `check_rule` | `lint-rule`: yes | The ESLint rule id the check asserts is clean. |
 | `check_violation_fixture`, `check_clean_fixture` | `test`: recommended (warning `fixture_missing` if absent) | Known-bad and known-clean subjects for gsd-core's fail-first prover. Without them the prover cannot prove the check and reports it `flagged`. |
+| `check_mutants` | `test`: optional (warning `no_mutants` if absent or empty) | Project-relative paths of extra violation fixtures (mutants) the check must also fail. See `standing-orders mutants`. Must be a list of non-empty relative paths without `..`, no duplicates, none a check file of the order (`type_invalid`, `path_invalid`, `duplicate_mutant`, `mutant_is_check_file`). Order is irrelevant to the order's hash. |
 | `source` | optional | Where the rule comes from (contract clause, decision id). |
 
-Any `check_*` key on a `backstop` order is kept but never run (warning `check_ignored_for_backstop`).
+Any `check_*` key (and `check_mutants`) on a `backstop` order is kept but never run (warning `check_ignored_for_backstop`).
 
 ### Enums
 
@@ -169,7 +170,7 @@ Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not ye
 - **Projection.** Every applicable order must also appear as a structured `must_haves` item in some plan, written exactly as `APPLICABLE.md`'s `Project as` line gives it:
   - a `test` order as a `prohibitions` item `{statement: "<id>: <statement>", status: resolved, verification: test, check_kind, check_target}` (plus `check_rule` for `lint-rule` and the fixtures when the order has them). It counts when the statement starts with `<id>:`, `status` is `resolved`, `verification` is `test`, `check_kind` matches, `check_target` and each fixture the order has match (paths compared as below), and for `lint-rule` `check_rule` matches;
   - a `backstop` order as a `truths` item `{statement: "<id>: <statement>", verification: backstop}`. It counts when the statement starts with `<id>:` and `verification` is `backstop`. `gsd-verifier` reports such a truth `insufficient_spec`, never passed.
-- **Check files.** For an applicable `test` order: its `check_target` when `check_kind` is `node-test`, and its `check_violation_fixture` and `check_clean_fixture` for either kind. A `lint-rule` order's `check_target` is the code the rule lints, so it is not a check file. Paths are compared canonically: surrounding whitespace trimmed, backslashes to `/`, `.` and `..` segments resolved, repeated and trailing `/` removed, leading `./` removed, and **case ignored** (macOS and Windows file systems ignore it, so `Tests/X.test.cjs` names the same file). Otherwise they must be equal: `tests/x.test.cjs.bak` is a different file.
+- **Check files.** For an applicable `test` order: its `check_target` when `check_kind` is `node-test`, and its `check_violation_fixture` and `check_clean_fixture` for either kind. A `lint-rule` order's `check_target` is the code the rule lints, so it is not a check file. Its `check_mutants` paths (for either kind) and `.planning/standing-orders/MUTANTS.json` (while it has mutants) are check files too. Paths are compared canonically: surrounding whitespace trimmed, backslashes to `/`, `.` and `..` segments resolved, repeated and trailing `/` removed, leading `./` removed, and **case ignored** (macOS and Windows file systems ignore it, so `Tests/X.test.cjs` names the same file). Otherwise they must be equal: `tests/x.test.cjs.bak` is a different file.
 - **Unusable rules.** When `ORDERS.yaml` is invalid or unreadable, `APPLICABLE.md` says so on its own line (`ORDERS.yaml could not be used (<state>): planning is blocked until it is fixed. Run standing-orders validate.`), so the planner never reads an empty list as "no rules apply". `select` writes the verdict first, then `APPLICABLE.md`, then `CONFLICTS.json`.
 
 ## Blocking rules
@@ -340,6 +341,56 @@ Direct-CLI exit codes: 0 done (or disabled); 1 a usage error or a refusal; 2 a f
 | `invalid_finding` | error | A proposed finding is malformed (no orders, empty or over-long statement, unknown key, or none at all). |
 | `semantic_unusable` | error | `STANDING-ORDERS-SEMANTIC.json` is invalid, a link, or over 4 MiB; it is not overwritten. |
 
+## Command: `standing-orders mutants`
+
+```
+gsd-tools standing-orders mutants --order <id> [--raw]
+gsd-tools standing-orders mutants --add '<json>' [--raw]
+gsd-tools standing-orders mutants --run --order <id> [--no-cache] [--raw]
+```
+
+A mutant is an extra violation fixture for a `test` order (`check_mutants`): a plausible wrong implementation the check must also reject. `standing-orders mutants` lists, adds and runs them. The skill `standing-orders-harden` drives it.
+
+- `--order <id>` lists the order's mutants as `{ path, exists, cached_outcome }` (`cached_outcome` is `killed`, `survived` or `null`). Read-only; it works while `standing-orders.enabled` is false. Result: `{ schema: 1, subcommand: "mutants", ok, disabled, mode: "list", order, mutants, written }`.
+- `--add` adds **exactly one** mutant, given as `{"order": <id>, "path": <project-relative path>, "content": <text>}`. A list, or `--add` given twice, is refused (`batch_refused`); anything that is not that object is a `usage` error. Disabled, it reports `disabled` before reading the argument. The new `ORDERS.yaml` text is built and verified in memory first (re-parsed; every other order's hash unchanged; the target order differs only by the added path); then the mutant file is written (parent directories only inside the project), then `ORDERS.yaml` atomically; if that write fails the mutant file is removed. Nothing is written when the order is not found (`order_not_found`) or not `test` (`order_not_test`), the path is absolute or contains `..` (`path_invalid`), resolves outside the project, also through a symbolic link (`path_outside_project`), is under `.planning/` (`path_reserved`), names a check file of the order (`mutant_is_check_file`), is already a mutant or already exists on disk (`mutant_exists`), or the content is empty or over 65536 bytes (`content_invalid`). When the `ORDERS.yaml` layout cannot take the insertion safely (for example a flow-style `check_mutants: [a]`), nothing is written and the refusal is `manual`, with the YAML to paste and the content to save. Line endings are preserved. Result: `{ schema: 1, subcommand: "mutants", ok, disabled, mode: "add", order, path, written }`.
+- `--run --order <id>` proves the base check and then every mutant through the same call `enforce` uses, writes `MUTANTS.json` when the cache changed, and prints `{ schema: 1, subcommand: "mutants", ok, disabled, mode: "run", order, base, mutants, verdict, written }`. `verdict` is `clear` or `flagged`. Disabled, it writes nothing. `--no-cache` ignores stored outcomes (fresh answers are still stored).
+
+Direct-CLI exit codes: 0 done (or disabled); 1 a usage error, a refusal, or `--run` with `verdict: flagged`; 2 a file could not be read.
+
+### Mutant enforcement
+
+`standing-orders enforce` (and `mutants --run`) runs a `test` order's mutants only when its base result is `green` and not `flagged`, in sorted path order, one at a time. Each call is the base request with only `check.violationFixture` replaced by the mutant path. A result with mutants gains `mutants: [{ path, outcome, cached, reason }]`; an order without mutants has no such key and its result is unchanged.
+
+| Outcome | Meaning |
+|---|---|
+| `killed` | The host answered `green`, not flagged: the check fails the mutant, as it should. |
+| `survived` | The host answered, but not green and unflagged: the check passes the mutant. The order is flagged `mutant_survived: <paths>`. |
+| `error` | No verdict: the mutant file is missing (`mutant_missing`), unreadable, a link, or outside the project (`mutant_unreadable`), or the host call failed. The order is flagged `mutant_unverified: <paths>`. An `error` is never cached. |
+
+When both occur the reason is `mutant_survived: ...; mutant_unverified: ...`; the status stays the host's base status.
+
+`.planning/standing-orders/MUTANTS.json` is the outcome cache, `{ schema: 1, entries: { <key>: { outcome, ts } } }`, written only when a mutant was run and only holding `killed` and `survived`. The key is a SHA-256 over the check kind, the rule, and the contents of the check target, the clean fixture and the mutant, so a changed file is a cache miss. When the target or clean fixture cannot be read the mutant still runs but is not cached. At most 2000 entries are kept (newest `ts`). A cache that is missing, a link, outside the project, over 4 MiB, not JSON or malformed is treated as empty, never as `killed`. A project with no mutants gets no `MUTANTS.json`. The cache does not see helpers the check imports. `enforce --no-cache` ignores stored outcomes.
+
+### Mutants in coverage
+
+Every `check_mutants` path of an applicable `test` order is a check file (a `lint-rule` order's included, unlike its `check_target`), and so is `.planning/standing-orders/MUTANTS.json` while such an order has mutants: a plan that lists either in `files_modified` is rejected like any other check-file edit.
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `order_not_found` | error | `mutants`: no order with that id. |
+| `order_not_test` | error | `mutants`: the order is not a `test` order. |
+| `path_outside_project` | error | `mutants --add`: the path resolves outside the project. |
+| `path_reserved` | error | `mutants --add`: the path is under `.planning/`. |
+| `mutant_exists` | error | `mutants --add`: the path is already a mutant or already exists. |
+| `content_invalid` | error | `mutants --add`: the content is empty or over 65536 bytes. |
+| `manual` | error | `mutants --add`: `ORDERS.yaml` cannot take the insertion safely; add the returned lines by hand. |
+| `mutant_survived` | flag reason | A mutant passed the check. |
+| `mutant_unverified` | flag reason | A mutant could not be proven. |
+| `mutant_missing` | flag reason | A mutant file does not exist. |
+| `mutant_unreadable` | flag reason | A mutant file is a link, outside the project, not a regular file, too large, or unreadable. |
+
+`path_invalid`, `mutant_is_check_file`, `batch_refused`, `usage`, `write_failed` and `orders_unusable` are as above and in the code tables.
+
 ## Commands: `standing-orders select | conflicts | coverage | enforce`
 
 ```
@@ -435,6 +486,10 @@ gsd-tools standing-orders validate [file] [--raw]           # through the instal
 | `fixture_missing` | warning | A test-tier order lacks a violation or clean fixture. |
 | `check_ignored_for_backstop` | warning | A `check_*` key on a backstop order. |
 | `check_target_missing` | warning | A test-tier `check_target` was not found under the project root. |
+| `no_mutants` | warning | A test-tier order has no `check_mutants`: its check is proven by one violation fixture only. |
+| `path_invalid` | error | A `check_mutants` entry is absolute, has a drive prefix, or contains a `..` segment. |
+| `duplicate_mutant` | error | A `check_mutants` entry repeats an earlier one (after `\` becomes `/`). |
+| `mutant_is_check_file` | error | A `check_mutants` entry is the order's own `check_target`, violation fixture or clean fixture. |
 | `path_outside_cwd` | error | The requested file resolves outside the project root. |
 | `file_not_found` | error | The requested file does not exist. |
 | `file_unreadable` | error | The file exists but could not be read. |
