@@ -5,7 +5,8 @@
  *
  * `files`: project-relative path -> text (parent directories are implied).
  * `dirs`: extra empty project-relative directories.
- * `links`: project-relative path -> absolute path `realpath` returns for it.
+ * `links`: project-relative path -> absolute path `realpath` returns for it; `isSymlink` is true for
+ * every declared link, dangling or not.
  * `overrides`: replace any dep (an IO failure is a dep that throws; never chmod).
  * `now` defaults to a fixed Date (2026-11-08T00:00:00.000Z); override it to move the clock.
  *
@@ -58,6 +59,7 @@ function memfs({ files = {}, dirs = [], links = {}, cwd = CWD, overrides = {} } 
   const deps = {
     exists: (p) => known(p),
     isFile: (p) => fileMap.has(p),
+    isSymlink: (p) => linkMap.has(p),
     realpath: (p) => {
       if (linkMap.has(p)) return linkMap.get(p);
       if (known(p)) return p;

@@ -1024,4 +1024,29 @@ describe('router select and the trace ledger', () => {
     assert.equal(corrupt.read(APPLICABLE_PATH), plain);
     assert.deepEqual(rc.stale, []);
   });
+
+  // R5: an order whose id is a prototype key is marked like any other.
+  it('anOrderNamedProtoIsMarkedStale', () => {
+    const protoOrder = order({ id: '__proto__', statement: 'Proto rule.', scope: SCOPE_BILLING });
+    const line =
+      JSON.stringify({
+        schema: 1,
+        order_id: '__proto__',
+        order_hash: 'sha256:' + '1'.repeat(64),
+        contexts: ['*'],
+        phase: OLD_PHASE,
+        plans: [],
+        files: [],
+        check: null,
+        disposition: 'insufficient_spec',
+        commit_sha: null,
+        ts: '2026-11-01T00:00:00.000Z',
+      }) + '\n';
+    const m = setup({ orders: doc({ orders: [protoOrder] }), files: { [TRACE_PATH]: line } });
+    const r = run(m, 'select');
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.applicable, ['__proto__']);
+    assert.deepEqual(r.stale, ['__proto__']);
+    assert.match(sectionOf(m.read(APPLICABLE_PATH), '__proto__'), /- Stale: changed since last traced in /);
+  });
 });

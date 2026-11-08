@@ -40,7 +40,7 @@ const { resolvePhase, runEnforcement, findHostCli, HOST_TIMEOUT_MS } = require('
 const { evaluateBlock, evaluateCoverage, evaluateEnforcement, renderVerdict, STATUS } = require('./lib/gate.cjs');
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
 const { errMessage, unique, isPlainObject, compareStrings } = require('./lib/util.cjs');
-const { TRACE_PATH, MAX_TRACE_BYTES, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
+const { TRACE_PATH, MAX_TRACE_BYTES, isValidPhase, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
 
 const FAMILY = 'standing-orders';
 const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
@@ -59,6 +59,8 @@ const DEFAULT_ORDERS_PATH = path.join('.planning', 'standing-orders', 'ORDERS.ya
 /** Refuse to read a rules file larger than this (bytes) — a rules file is small by nature. */
 const MAX_FILE_BYTES = 256 * 1024;
 const REPORT_SCHEMA = 1;
+/** Refuse to read an ENFORCEMENT.json larger than this (bytes). */
+const MAX_ENFORCEMENT_BYTES = 16 * 1024 * 1024;
 
 /** Every error code the loop subcommands (select, conflicts, coverage, enforce) emit themselves. */
 const LOOP_CODES = Object.freeze({
@@ -71,6 +73,8 @@ const LOOP_CODES = Object.freeze({
   ORDERS_UNUSABLE: 'orders_unusable',
   TRACE_TOO_LARGE: 'trace_too_large',
   TRACE_UNREADABLE: 'trace_unreadable',
+  TRACE_NOT_REGULAR: 'trace_not_regular',
+  PHASE_NAME_INVALID: 'phase_name_invalid',
 });
 
 const FILE_ERROR_CODES = new Set([
@@ -92,6 +96,14 @@ function defaultDeps() {
         return fs.statSync(p).isFile();
       } catch (e) {
         return false;
+      }
+    },
+    isSymlink: (p) => {
+      try {
+        return fs.lstatSync(p).isSymbolicLink();
+      } catch (e) {
+        if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return false;
+        throw e;
       }
     },
     listDir: (p) => fs.readdirSync(p),
@@ -373,7 +385,7 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
     loadedOrders,
     inputs,
     files: selection.files,
-    stale: {},
+    stale: Object.create(null),
     staleIds: [],
     traceWarnings: [],
     applicable,
@@ -537,6 +549,21 @@ function traceProblem(code, message) {
   return { failure: { code, message } };
 }
 
+/** A failure when the ledger path is a symbolic link (dangling, in the project or outside it), else null. */
+function ledgerLinkProblem(abs, io) {
+  try {
+    if (io.isSymlink(abs)) return traceProblem(LOOP_CODES.TRACE_NOT_REGULAR, `${TRACE_PATH} is a symbolic link; the ledger must be a regular file`);
+  } catch (e) {
+    return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} could not be examined: ${errMessage(e)}`);
+  }
+  return null;
+}
+
+/** Text of a dep result that may be undefined or null. */
+function outputText(out) {
+  return out === undefined || out === null ? '' : String(out);
+}
+
 /**
  * Read TRACE.jsonl under `root` with the same containment and size guards as every
  * other file the router reads. A missing ledger is empty text, not a failure.
@@ -544,6 +571,8 @@ function traceProblem(code, message) {
  */
 function readTraceFile({ root, io }) {
   const abs = path.resolve(root, TRACE_PATH);
+  const linked = ledgerLinkProblem(abs, io);
+  if (linked !== null) return linked;
   if (!io.exists(abs)) return { text: '' };
   let realFile;
   try {
@@ -569,10 +598,19 @@ function readTraceFile({ root, io }) {
   }
 }
 
-/** ENFORCEMENT.json as an object, or null when it is missing, unreadable or not an object. */
+/**
+ * ENFORCEMENT.json as an object, or null when it is missing, a symbolic link, outside the
+ * project, oversized, unreadable or not an object. Any problem means "unenforced", never an error.
+ */
 function readEnforcement({ root, io }) {
+  const abs = path.resolve(root, ENFORCEMENT_PATH);
   try {
-    const parsed = JSON.parse(String(io.readFile(path.resolve(root, ENFORCEMENT_PATH))));
+    if (io.isSymlink(abs) || !io.exists(abs)) return null;
+    const realFile = io.realpath(abs);
+    if (!isInside(io.realpath(root), realFile)) return null;
+    const size = io.statSize(realFile);
+    if (typeof size !== 'number' || !(size <= MAX_ENFORCEMENT_BYTES)) return null;
+    const parsed = JSON.parse(String(io.readFile(abs)));
     return isPlainObject(parsed) ? parsed : null;
   } catch (e) {
     return null;
@@ -594,7 +632,7 @@ function resolveCommitSha({ root, io }) {
   } catch (e) {
     return unresolved(errMessage(e));
   }
-  const sha = String(out === undefined || out === null ? '' : out).trim();
+  const sha = outputText(out).trim();
   return COMMIT_SHA_RE.test(sha) ? { sha, warning: null } : unresolved('git printed no commit id');
 }
 
@@ -607,7 +645,7 @@ function notCommitted(reason) {
 
 /** Parse the host commit tool's JSON answer (following an `@file:` pointer), or null. */
 function parseHostAnswer(out, io) {
-  let text = String(out === undefined || out === null ? '' : out).trim();
+  let text = outputText(out).trim();
   try {
     if (text.startsWith('@file:')) text = String(io.readFile(text.slice('@file:'.length))).trim();
     const parsed = JSON.parse(text);
@@ -677,8 +715,11 @@ function appendAndCommit({ ev, root, io, records, warnings, commitSha, error }) 
   const all = [...warnings, ...parsed.warnings];
   const ids = diff.append.map((r) => r.order_id);
   if (diff.append.length === 0) return traceResult({ ev, appended: [], skipped: diff.skipped, commitSha, commit: none, warnings: all, written: [] });
+  const target = path.resolve(root, TRACE_PATH);
+  const relinked = ledgerLinkProblem(target, io);
+  if (relinked !== null) return loopFailure('trace', relinked.failure.code, relinked.failure.message, [], error);
   try {
-    io.appendFile(path.resolve(root, TRACE_PATH), appendText(existing.text, diff.append));
+    io.appendFile(target, appendText(existing.text, diff.append));
   } catch (e) {
     return loopFailure('trace', LOOP_CODES.WRITE_FAILED, `trace: could not write ${TRACE_PATH}: ${errMessage(e)}`, [], error);
   }
@@ -694,6 +735,12 @@ function runTrace({ ev, root, io, error }) {
     return loopFailure('trace', LOOP_CODES.ORDERS_UNUSABLE, `trace: ORDERS.yaml could not be used (${state}); run standing-orders validate`, [], error);
   }
   const warnings = [...ev.warnings];
+  if (ev.applicable.length === 0) {
+    return traceResult({ ev, appended: [], skipped: [], commitSha: null, commit: { committed: false, hash: null, reason: null }, warnings, written: [] });
+  }
+  if (!isValidPhase(ev.phaseRel)) {
+    return loopFailure('trace', LOOP_CODES.PHASE_NAME_INVALID, `trace: phase directory ${JSON.stringify(ev.phaseRel)} cannot be recorded; use letters, digits, ".", "_", "-" and "/" only (at most 200 characters, no "..")`, [], error);
+  }
   const git = resolveCommitSha({ root, io });
   if (git.warning !== null) warnings.push(git.warning);
   const records = buildRecords({
@@ -706,9 +753,6 @@ function runTrace({ ev, root, io, error }) {
     commitSha: git.sha,
     ts: io.now().toISOString(),
   });
-  if (records.length === 0) {
-    return traceResult({ ev, appended: [], skipped: [], commitSha: git.sha, commit: { committed: false, hash: null, reason: null }, warnings, written: [] });
-  }
   return appendAndCommit({ ev, root, io, records, warnings, commitSha: git.sha, error });
 }
 
@@ -779,6 +823,14 @@ function queryFailure({ subcommand, code, message, rawOut, io, error }) {
   return result;
 }
 
+/** The document a query compares the ledger with: a MISSING ORDERS.yaml is an empty one (every traced order is removed); an unusable one is null. */
+function queryDocument(loaded) {
+  if (loaded.stage === 'ok') return loaded.document;
+  const first = loaded.report.errors[0];
+  if (loaded.stage === 'file' && first && first.code === ERROR_CODES.FILE_NOT_FOUND) return { orders: [], contexts: {}, leafSets: {}, allLeaves: [] };
+  return null;
+}
+
 /** `impact <id>` and `stale`: read-only queries over TRACE.jsonl and ORDERS.yaml; not gated on `enabled`. */
 function runQueryCommand({ subcommand, rest, cwd, raw, error, io }) {
   const rawOut = raw === true || rest.includes('--raw');
@@ -787,7 +839,7 @@ function runQueryCommand({ subcommand, rest, cwd, raw, error, io }) {
   if (parsed.usage !== undefined) return fail(LOOP_CODES.USAGE, parsed.usage);
   const root = path.resolve(cwd);
   const loaded = loadOrders({ cwd: root, fileArg: DEFAULT_ORDERS_PATH, deps: io });
-  const document = loaded.stage === 'ok' ? loaded.document : null;
+  const document = queryDocument(loaded);
   const trace = readTraceFile({ root, io });
   if (trace.failure !== undefined) return fail(trace.failure.code, trace.failure.message);
   const ledger = parseTrace(trace.text);

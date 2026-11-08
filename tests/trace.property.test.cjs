@@ -107,7 +107,7 @@ describe('trace — properties', () => {
 
   it('appendIsPrefixPreserving', () => {
     const recordArb = fc
-      .record({ id: fc.stringMatching(/^[A-Z][A-Z0-9-]{1,8}$/), hex: fc.stringMatching(/^[0-9a-f]{64}$/), phase: segment, sha: fc.option(fc.stringMatching(/^[0-9a-f]{40}$/), { nil: null }) })
+      .record({ id: fc.stringMatching(/^[A-Z][A-Z0-9-]{1,8}$/), hex: fc.stringMatching(/^[0-9a-f]{64}$/), phase: fc.stringMatching(/^[a-z0-9][a-z0-9_-]{0,5}$/), sha: fc.option(fc.stringMatching(/^[0-9a-f]{40}$/), { nil: null }) })
       .map((r) => ({
         schema: 1,
         order_id: r.id,
