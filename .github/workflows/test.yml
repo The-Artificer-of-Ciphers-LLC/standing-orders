@@ -50,5 +50,5 @@ jobs:
       - name: Host contract tests
         env:
           GSD_CORE_DIR: ${{ runner.temp }}/gsd/package
-          STANDING_ORDERS_GIT_SOURCE: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}#sha:${{ github.event.pull_request.head.sha || github.sha }}
+          STANDING_ORDERS_GIT_SOURCE: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}#${{ github.head_ref || github.ref_name }}
         run: node --test tests/host-contract.test.cjs
