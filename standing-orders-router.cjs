@@ -69,7 +69,7 @@ function defaultDeps() {
       }
     },
     listDir: (p) => fs.readdirSync(p),
-    writeFile: (p, text) => fs.writeFileSync(p, text),
+    writeFile: (p, text) => fs.writeFileSync(p, text, { flag: 'wx' }),
     rename: (from, to) => fs.renameSync(from, to),
     mkdir: (p) => fs.mkdirSync(p, { recursive: true }),
     execFile: (file, args, opts) => require('node:child_process').execFileSync(file, args, opts),
@@ -320,7 +320,7 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
   };
 
   const root = path.resolve(cwd);
-  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile });
+  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
   if (!config.enabled) {
     const result = { schema: REPORT_SCHEMA, subcommand, ok: true, disabled: true, message: DISABLED_MESSAGE, written: [] };
     io.log(rawOut ? JSON.stringify(result) : DISABLED_MESSAGE);
@@ -377,6 +377,17 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
 
   const written = [];
   let seq = 0;
+  if (subcommand === 'select') {
+    const soDir = path.resolve(root, path.dirname(APPLICABLE_PATH));
+    try {
+      io.mkdir(soDir);
+      if (!isInside(io.realpath(root), io.realpath(soDir))) {
+        return loopFailure(subcommand, 'path_outside_cwd', `${toSlashes(path.dirname(APPLICABLE_PATH))} resolves (through a link) outside the project root`, [], error);
+      }
+    } catch (e) {
+      return loopFailure(subcommand, 'write_failed', `${subcommand}: could not prepare output directory: ${errMessage(e)}`, [], error);
+    }
+  }
   const put = (rel, text) => {
     writeAtomic(io, path.resolve(root, rel), text, seq++);
     written.push(rel);

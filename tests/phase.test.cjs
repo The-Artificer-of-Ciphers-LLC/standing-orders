@@ -124,6 +124,12 @@ describe('phase', () => {
     assert.deepEqual(splitReqIds(['A']), []);
   });
 
+  it('duplicateKeyCannotHideAnAlias', () => {
+    const r = parsePlanFrontmatter('---\na: 1\na: 2\nx: &x [a, b]\ny: *x\n---\n');
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'anchors or aliases refused');
+  });
+
   describe('collectPhaseInputs', () => {
     const PHASE_REL = '.planning/phases/03-billing';
 
@@ -199,6 +205,31 @@ describe('phase', () => {
         r.warnings.map((w) => w.code),
         ['doc_unreadable'],
       );
+    });
+
+    it('planOverSizeCapIsUnreadable', () => {
+      const fs = memfs({ files: { [`${PHASE_REL}/03-01-PLAN.md`]: PLAN_TEXT } });
+      const deps = { listDir: fs.deps.listDir, readFile: fs.deps.readFile, realpath: fs.deps.realpath, statSize: () => MAX_DOC_BYTES + 1 };
+      const r = collectPhaseInputs({ phaseDir: path.resolve(fs.cwd, PHASE_REL), deps });
+      assert.equal(r.plans.length, 1);
+      assert.equal(r.plans[0].ok, false);
+      assert.equal(r.plans[0].error, 'plan too large');
+      assert.deepEqual(fs.calls.readFile, []);
+    });
+
+    it('symlinkedDocOutsidePhaseSkipped', () => {
+      const fs = memfs({
+        files: { [`${PHASE_REL}/03-RESEARCH.md`]: 'See `src/ok/seen.js`.\n' },
+        links: { [`${PHASE_REL}/03-CONTEXT.md`]: '/elsewhere/secret.md', [`${PHASE_REL}/03-01-PLAN.md`]: '/elsewhere/plan.md' },
+      });
+      const deps = { listDir: fs.deps.listDir, readFile: fs.deps.readFile, realpath: fs.deps.realpath, statSize: () => 10 };
+      const r = collectPhaseInputs({ phaseDir: path.resolve(fs.cwd, PHASE_REL), deps });
+      assert.ok(r.warnings.some((w) => w.code === 'doc_outside_phase'));
+      assert.deepEqual(r.files, ['src/ok/seen.js']);
+      assert.equal(r.plans.length, 1);
+      assert.equal(r.plans[0].ok, false);
+      assert.equal(r.plans[0].error, 'outside phase directory');
+      assert.ok(!fs.calls.readFile.some((p) => p.endsWith('03-CONTEXT.md') || p.endsWith('-PLAN.md')));
     });
   });
 });

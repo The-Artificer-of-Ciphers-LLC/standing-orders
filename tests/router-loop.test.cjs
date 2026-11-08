@@ -431,4 +431,12 @@ describe('router loop subcommands', () => {
     assert.equal(r.ok, true);
     assert.ok(r.warnings.some((w) => w.code === 'phase_dir_unreadable'));
   });
+
+  it('standingOrdersDirSymlinkOutsideRefused', () => {
+    const m = setup({ links: { '.planning/standing-orders': '/elsewhere/so' } });
+    const r = run(m, 'select');
+    assert.equal(r.ok, false);
+    assert.equal(r.errors[0].code, 'path_outside_cwd');
+    assert.deepEqual(m.calls.rename, []);
+  });
 });
