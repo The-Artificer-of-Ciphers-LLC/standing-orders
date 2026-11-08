@@ -10,7 +10,8 @@ const { order, testOrder, parsed, SEED } = require('./helpers/fixtures.cjs');
 const segment = fc.stringMatching(/^[a-z0-9_.-]{1,6}$/);
 const globArb = fc.array(fc.oneof(segment, fc.constant('*'), fc.constant('**')), { minLength: 1, maxLength: 3 }).map((s) => s.join('/'));
 const reqId = fc.stringMatching(/^[A-Z]{2,4}-[0-9]{1,2}$/);
-const text = fc.stringMatching(/^[A-Za-z0-9 ,.]{1,20}$/);
+// Non-blank: the parser rejects a whitespace-only statement or source, so a blank one is a setup error, not a hash case.
+const text = fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9 ,.]{0,19}$/);
 
 const specArb = fc.record({
   id: fc.stringMatching(/^[A-Z][A-Z0-9-]{1,8}$/),
