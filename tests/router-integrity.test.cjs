@@ -172,6 +172,19 @@ describe('coverage: files_modified entries that cover a check file', () => {
     assert.equal(dangling.r.ok, true);
   });
 
+  it('coverageCatchesGlobThroughSymlinkedDirectory', () => {
+    for (const entry of ['sdir/**', 'sdir/*.cjs', 'sdir/a.*', 'sdir/{a,b}.test.cjs']) {
+      const { r } = coverWith([entry], { links: { sdir: '/proj/tests' } });
+      assert.equal(r.coverage, 'incomplete', entry);
+      assert.ok(editedFiles(r).includes('tests/a.test.cjs'), entry);
+      assert.ok(r.reasons.some((x) => x.code === 'check_file_modified'), entry);
+    }
+    // negative space: a link to a directory that holds no check file
+    const harmless = coverWith(['sdir/**'], { links: { sdir: '/proj/docs' }, files: { 'docs/readme.md': 'x\n' } });
+    assert.equal(harmless.r.coverage, 'complete');
+    assert.deepEqual(harmless.r.checkFileEdits, []);
+  });
+
   // matrix row 8
   it('ordersFileProtected', () => {
     for (const entry of ['.planning/standing-orders/ORDERS.yaml', '.\\.planning\\standing-orders\\ORDERS.yaml', '.PLANNING/standing-orders/orders.yaml', '.planning/standing-orders/', '.planning/**', '/proj/.planning/standing-orders/ORDERS.yaml']) {
