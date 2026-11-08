@@ -9,7 +9,7 @@ Install Standing Orders into a GSD project, turn it on, and get every phase's pl
 From a git tag (recommended):
 
 ```bash
-gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.2.0
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.3.0
 ```
 
 or from a local directory:
@@ -70,7 +70,24 @@ Before writing plans, the planner runs `standing-orders select` for the phase. T
 - `.planning/standing-orders/CONFLICTS.json` — the full conflict report;
 - `STANDING-ORDERS.md` in the phase directory — the verdict the gates read.
 
-The planner cites each applicable rule's id in a plan's `must_haves`. After planning, `standing-orders coverage` re-checks the written plans, and the phase cannot proceed unless the verdict says `conflicts: clear` and `coverage: complete`.
+The planner copies each applicable rule into a plan's `must_haves`, using the `Project as` line `APPLICABLE.md` prints for it:
+
+```yaml
+must_haves:
+  prohibitions:
+    - statement: "REFUND-IDEMPOTENT: A refund for one payment is never executed more than once."
+      status: resolved
+      verification: test
+      check_kind: node-test
+      check_target: tests/billing/refund-idempotent.test.cjs
+  truths:
+    - statement: "INVOICE-ROUNDING: Invoice totals round half to even."
+      verification: backstop
+```
+
+A `test` rule becomes a `prohibitions` item and a `backstop` rule a `truths` item; this is how the rules reach GSD's verifier, which reports a `backstop` rule as `insufficient_spec` rather than passed. The planner also keeps every check file (the rule's test, and its violation and clean fixtures) out of `files_modified`: checks are written before the phase that implements the rule.
+
+After planning, `standing-orders coverage` re-checks the written plans, and the phase cannot proceed unless the verdict says `conflicts: clear` and `coverage: complete`. During execution, after every wave, `standing-orders enforce` proves each `test` rule's check; see [How to resolve a wave blocked by Standing Orders](resolve-standing-orders-enforcement.md).
 
 You can run the same check yourself at any time, without writing anything:
 
@@ -88,7 +105,9 @@ Open the phase's `STANDING-ORDERS.md`; each finding is one line with a reason co
 | `orders_invalid` | `ORDERS.yaml` has errors. Run `gsd-tools standing-orders validate` and fix what it lists. |
 | `orders_unreadable` | `ORDERS.yaml` could not be read (over 256 KiB, a link that leaves the project, or a permissions problem). |
 | `missing_check` | Only with `block_on: conflict_or_missing`. Write the check file the rule names, or set the rule to `verification: backstop` until it exists. |
-| `uncited` | A plan must cite that rule's id in its `must_haves`. Re-run planning, or add the citation to the plan that implements the rule. |
+| `uncited` | A plan must cite that rule's id in its `must_haves`. Re-run planning, or add the rule's `Project as` item to the plan that implements it. |
+| `not_projected` | The rule is mentioned but not as the structured item `APPLICABLE.md` gives. Copy its `Project as` item into the plan's `must_haves` exactly (same section, same `verification`, same `check_kind` and `check_target`). |
+| `check_file_modified` | A plan lists one of a rule's check files in `files_modified`. Remove it from the plan. If the check itself is wrong, fix it in its own phase first, before the phase that implements the rule. |
 | `no_plans` | Rules apply but the phase has no plans yet. |
 | `plan_unreadable` | A plan's frontmatter could not be parsed (for example it uses YAML anchors). Fix that plan. |
 
