@@ -50,5 +50,8 @@ jobs:
       - name: Host contract tests
         env:
           GSD_CORE_DIR: ${{ runner.temp }}/gsd/package
-          STANDING_ORDERS_GIT_SOURCE: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}#${{ github.head_ref || github.ref_name }}
+          # gsd-core 1.19-1.20 cannot check out a non-default ref after its clone
+          # (#sha:<commit> and branch names both fail), so install-from-git runs on
+          # pushes to main only, against the default branch.
+          STANDING_ORDERS_GIT_SOURCE: ${{ github.event_name == 'push' && format('{0}/{1}.git', github.server_url, github.repository) || '' }}
         run: node --test tests/host-contract.test.cjs
