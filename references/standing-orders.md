@@ -158,7 +158,8 @@ Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not ye
 - **Files.** The backtick-quoted paths named in the phase directory's planning markdown (every `*.md` except plans, summaries and the verdict; fenced code blocks are skipped), plus every plan's `files_modified`, plus `--files a,b`. Only tokens that look like relative paths count: no whitespace, no shell metacharacters, no URL, no `..` segment, containing `/` or ending in an extension.
 - **Requirements.** The phase's requirement ids plus every plan's `requirements`.
 - **Plans.** `*-PLAN.md` in the phase directory. Their frontmatter is parsed like `ORDERS.yaml` (anchors and aliases refused, every scalar a string). A plan whose frontmatter cannot be read makes coverage `incomplete` (`plan_unreadable`): what cannot be read cannot be counted as covered.
-- **Citation.** An order is cited when its id appears in a string anywhere under a plan's `must_haves`, as a whole token: the characters around it must not be letters, digits, `_` or `-`. `REFUND-A` is not cited by `REFUND-AB`.
+- **Citation.** An order is cited when its id appears in a string anywhere under a plan's `must_haves`, as a whole token: the characters around it must not be letters, digits, `_` or `-`. `REFUND-A` is not cited by `REFUND-AB`. A citation is a mention, not a judgement: whether the plan actually honors the order is graded at verification.
+- **Unusable rules.** When `ORDERS.yaml` is invalid or unreadable, `APPLICABLE.md` says so on its own line (`ORDERS.yaml could not be used (<state>): planning is blocked until it is fixed. Run standing-orders validate.`), so the planner never reads an empty list as "no rules apply". `select` writes the verdict first, then `APPLICABLE.md`, then `CONFLICTS.json`.
 
 ## Blocking rules
 

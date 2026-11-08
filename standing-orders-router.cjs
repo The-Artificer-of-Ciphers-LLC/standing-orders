@@ -34,6 +34,7 @@ const { collectPhaseInputs, splitReqIds } = require('./lib/phase.cjs');
 const { resolvePhase } = require('./lib/host.cjs');
 const { evaluateBlock, evaluateCoverage, renderVerdict, STATUS } = require('./lib/gate.cjs');
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
+const { errMessage, unique } = require('./lib/util.cjs');
 
 const FAMILY = 'standing-orders';
 const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'validate']);
@@ -46,6 +47,16 @@ const DEFAULT_ORDERS_PATH = path.join('.planning', 'standing-orders', 'ORDERS.ya
 /** Refuse to read a rules file larger than this (bytes) — a rules file is small by nature. */
 const MAX_FILE_BYTES = 256 * 1024;
 const REPORT_SCHEMA = 1;
+
+/** Every error code the loop subcommands (select, conflicts, coverage) emit themselves. */
+const LOOP_CODES = Object.freeze({
+  USAGE: 'usage',
+  PATH_OUTSIDE_CWD: 'path_outside_cwd',
+  PHASE_DIR_NOT_FOUND: 'phase_dir_not_found',
+  WRITE_FAILED: 'write_failed',
+  INTERNAL_ERROR: 'internal_error',
+  ORDERS_FILE_MISSING: 'orders_file_missing',
+});
 
 const FILE_ERROR_CODES = new Set([
   ERROR_CODES.PATH_OUTSIDE_CWD,
@@ -149,7 +160,7 @@ function loadOrders({ cwd, fileArg, deps }) {
     }
     size = deps.statSize(realFile);
   } catch (e) {
-    return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} could not be examined: ${e && e.message ? e.message : String(e)}`);
+    return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} could not be examined: ${errMessage(e)}`);
   }
   if (typeof size !== 'number' || !Number.isFinite(size)) {
     return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} has no readable size`);
@@ -162,7 +173,7 @@ function loadOrders({ cwd, fileArg, deps }) {
   try {
     text = deps.readFile(abs);
   } catch (e) {
-    return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} could not be read: ${e && e.message ? e.message : String(e)}`);
+    return fail(ERROR_CODES.FILE_UNREADABLE, `${toSlashes(fileArg)} could not be read: ${errMessage(e)}`);
   }
 
   const parsed = parseOrders(text);
@@ -206,15 +217,8 @@ function validateFile({ cwd, fileArg, deps }) {
 
 // ─── Loop subcommands: select, conflicts, coverage ────────────────────────────
 
+// `--ws` is part of the host contract (the dispatcher forwards it): accepted and ignored.
 const VALUE_FLAGS = new Set(['--phase', '--phase-dir', '--req-ids', '--files', '--ws']);
-
-function errMessage(e) {
-  return e && e.message ? e.message : String(e);
-}
-
-function unique(list) {
-  return [...new Set(list)];
-}
 
 /** Parse the loop flags. Returns { options } or { usage: message }. */
 function parseLoopFlags(subcommand, rest) {
@@ -256,19 +260,19 @@ function writeAtomic(io, abs, text, seq) {
 
 function containPhaseDir(root, phaseDir, io) {
   if (!isInside(root, phaseDir)) {
-    return { code: 'path_outside_cwd', message: `phase directory ${toSlashes(phaseDir)} resolves outside the project root ${toSlashes(root)}` };
+    return { code: LOOP_CODES.PATH_OUTSIDE_CWD, message: `phase directory ${toSlashes(phaseDir)} resolves outside the project root ${toSlashes(root)}` };
   }
-  if (!io.exists(phaseDir)) return { code: 'phase_dir_not_found', message: `phase directory ${toSlashes(path.relative(root, phaseDir))} does not exist` };
+  if (!io.exists(phaseDir)) return { code: LOOP_CODES.PHASE_DIR_NOT_FOUND, message: `phase directory ${toSlashes(path.relative(root, phaseDir))} does not exist` };
   let realRoot;
   let realDir;
   try {
     realRoot = io.realpath(root);
     realDir = io.realpath(phaseDir);
   } catch (e) {
-    return { code: 'phase_dir_not_found', message: `phase directory could not be examined: ${errMessage(e)}` };
+    return { code: LOOP_CODES.PHASE_DIR_NOT_FOUND, message: `phase directory could not be examined: ${errMessage(e)}` };
   }
   if (!isInside(realRoot, realDir)) {
-    return { code: 'path_outside_cwd', message: `phase directory ${toSlashes(path.relative(root, phaseDir))} resolves (through a link) outside the project root` };
+    return { code: LOOP_CODES.PATH_OUTSIDE_CWD, message: `phase directory ${toSlashes(path.relative(root, phaseDir))} resolves (through a link) outside the project root` };
   }
   return null;
 }
@@ -280,7 +284,7 @@ function ordersForGate(cwd, io) {
   if (loaded.stage === 'file') {
     const first = loaded.report.errors[0];
     if (first && first.code === ERROR_CODES.FILE_NOT_FOUND) {
-      warnings.push({ code: 'orders_file_missing', message: first.message });
+      warnings.push({ code: LOOP_CODES.ORDERS_FILE_MISSING, message: first.message });
       return { orders: { state: 'missing', errors: [], conflicts: [], missingChecks: [] }, document: null, warnings };
     }
     return { orders: { state: 'unreadable', errors: loaded.report.errors, conflicts: [], missingChecks: [] }, document: null, warnings };
@@ -309,40 +313,18 @@ function loopFailure(subcommand, code, message, written, error) {
   return { schema: REPORT_SCHEMA, subcommand, ok: false, errors: [{ code, message }], written };
 }
 
-function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
-  const parsed = parseLoopFlags(subcommand, rest);
-  if (parsed.usage !== undefined) return loopFailure(subcommand, 'usage', parsed.usage, [], error);
-  const options = parsed.options;
-  const rawOut = raw === true || options.raw;
-  const emit = (result) => {
-    if (rawOut) io.log(JSON.stringify(result));
-    else for (const l of humanLoopLines(result)) io.log(l);
-  };
+/** Resolve the phase directory (and the host's requirement ids) from the parsed flags. */
+function resolvePhaseDir({ options, root, io }) {
+  if (options.phaseDir !== null) return { ok: true, phaseDir: path.resolve(root, options.phaseDir), reqIds: [] };
+  const resolved = resolvePhase({ phase: options.phase, cwd: root, env: io.env, argv: io.argv, deps: io });
+  if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message };
+  return { ok: true, phaseDir: resolved.phaseDir, reqIds: resolved.reqIds };
+}
 
-  const root = path.resolve(cwd);
-  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
-  if (!config.enabled) {
-    const result = { schema: REPORT_SCHEMA, subcommand, ok: true, disabled: true, message: DISABLED_MESSAGE, written: [] };
-    io.log(rawOut ? JSON.stringify(result) : DISABLED_MESSAGE);
-    return result;
-  }
-
-  let reqIds = [];
-  let phaseDir;
-  if (options.phaseDir !== null) {
-    phaseDir = path.resolve(root, options.phaseDir);
-  } else {
-    const resolved = resolvePhase({ phase: options.phase, cwd: root, env: io.env, argv: io.argv, deps: io });
-    if (!resolved.ok) return loopFailure(subcommand, resolved.code, resolved.message, [], error);
-    phaseDir = resolved.phaseDir;
-    reqIds = resolved.reqIds;
-  }
-  const bad = containPhaseDir(root, phaseDir, io);
-  if (bad !== null) return loopFailure(subcommand, bad.code, bad.message, [], error);
-  if (options.reqIds !== null) reqIds = splitReqIds(options.reqIds);
-
+/** Everything the three loop subcommands derive from the phase and ORDERS.yaml, before any write. */
+function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io }) {
   const phaseRel = toSlashes(path.relative(root, phaseDir));
-  const loadedOrders = ordersForGate(cwd, io);
+  const loadedOrders = ordersForGate(root, io);
   const inputs = collectPhaseInputs({ phaseDir, deps: io });
   const extraFiles = options.files === null ? [] : options.files.split(',').map((p) => p.trim()).filter((p) => p !== '').map(normalizePath);
   const selection = {
@@ -351,17 +333,12 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
   };
   const applicable = selectApplicable(loadedOrders.document, selection);
   const applicableIds = applicable.map((o) => o.id);
-  const applicableSet = new Set(applicableIds);
   const block = evaluateBlock({ orders: loadedOrders.orders, applicableIds, blockOn: config.blockOn });
-  const warnings = [...config.warnings, ...loadedOrders.warnings, ...inputs.warnings];
-  const verdictRel = `${phaseRel}/${VERDICT_NAME}`;
 
-  let coverageStatus = null;
+  let coverageStatus = subcommand === 'select' ? STATUS.PENDING : null;
   let reasons = block.reasons;
   let uncited = [];
-  let omitted = [];
   let cov = null;
-  if (subcommand === 'select') coverageStatus = STATUS.PENDING;
   if (subcommand === 'coverage') {
     cov = evaluateCoverage({
       applicableIds,
@@ -372,75 +349,159 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
     reasons = [...block.reasons, ...cov.reasons];
     uncited = cov.uncited;
   }
-  const verdictText = (coverage, generatedBy) =>
-    renderVerdict({ phase: path.basename(phaseDir), conflicts: block.status, coverage, generatedBy, applicableIds, reasons });
-
-  const written = [];
-  let seq = 0;
-  if (subcommand === 'select') {
-    const soDir = path.resolve(root, path.dirname(APPLICABLE_PATH));
-    try {
-      io.mkdir(soDir);
-      if (!isInside(io.realpath(root), io.realpath(soDir))) {
-        return loopFailure(subcommand, 'path_outside_cwd', `${toSlashes(path.dirname(APPLICABLE_PATH))} resolves (through a link) outside the project root`, [], error);
-      }
-    } catch (e) {
-      return loopFailure(subcommand, 'write_failed', `${subcommand}: could not prepare output directory: ${errMessage(e)}`, [], error);
-    }
-  }
-  const put = (rel, text) => {
-    writeAtomic(io, path.resolve(root, rel), text, seq++);
-    written.push(rel);
+  return {
+    phaseDir,
+    phaseRel,
+    reqIds,
+    loadedOrders,
+    applicable,
+    applicableIds,
+    block,
+    warnings: [...config.warnings, ...loadedOrders.warnings, ...inputs.warnings],
+    verdictRel: `${phaseRel}/${VERDICT_NAME}`,
+    coverageStatus,
+    reasons,
+    uncited,
+    cov,
   };
+}
+
+function verdictText(ev, coverage, generatedBy) {
+  return renderVerdict({
+    phase: path.basename(ev.phaseDir),
+    conflicts: ev.block.status,
+    coverage,
+    generatedBy,
+    applicableIds: ev.applicableIds,
+    reasons: ev.reasons,
+  });
+}
+
+/** APPLICABLE.md text; says so plainly when ORDERS.yaml could not be used, rather than listing nothing. */
+function applicableText(ev, config) {
+  const phase = path.basename(ev.phaseDir);
+  const rendered = renderApplicable(ev.applicable, { maxBytes: config.maxBytes, phase });
+  const state = ev.loadedOrders.orders.state;
+  if (state !== 'invalid' && state !== 'unreadable') return rendered;
+  const empty = renderApplicable([], { maxBytes: Infinity, phase }).text;
+  const footerAt = empty.lastIndexOf('0 applicable order(s) omitted');
+  const notice = `ORDERS.yaml could not be used (${state}): planning is blocked until it is fixed. Run standing-orders validate.\n`;
+  return { text: empty.slice(0, footerAt) + notice + empty.slice(footerAt), omitted: [] };
+}
+
+/** Make sure the output directory exists and stays inside the project. Returns a failure or null. */
+function prepareOutputDir({ subcommand, root, io }) {
+  const soDir = path.resolve(root, path.dirname(APPLICABLE_PATH));
   try {
-    if (subcommand === 'select') {
-      const rendered = renderApplicable(applicable, { maxBytes: config.maxBytes, phase: path.basename(phaseDir) });
-      omitted = rendered.omitted;
-      const conflictsDoc = {
-        schema: REPORT_SCHEMA,
-        phase: phaseRel,
-        status: block.status,
-        reasons: block.reasons,
-        conflicts: loadedOrders.orders.conflicts.map((c) => ({ ...c, applicable: Array.isArray(c.orders) && c.orders.some((id) => applicableSet.has(id)) })),
-        missingChecks: loadedOrders.orders.missingChecks.map((m) => ({ ...m, applicable: applicableSet.has(m.id) })),
-        errors: loadedOrders.orders.errors,
-        warnings,
-      };
-      put(APPLICABLE_PATH, rendered.text);
-      put(CONFLICTS_PATH, JSON.stringify(conflictsDoc, null, 2) + '\n');
-      put(verdictRel, verdictText(STATUS.PENDING, 'select'));
-    } else if (subcommand === 'coverage') {
-      put(verdictRel, verdictText(cov.status, 'coverage'));
+    io.mkdir(soDir);
+    if (!isInside(io.realpath(root), io.realpath(soDir))) {
+      return { code: LOOP_CODES.PATH_OUTSIDE_CWD, message: `${toSlashes(path.dirname(APPLICABLE_PATH))} resolves (through a link) outside the project root` };
     }
   } catch (e) {
-    if (subcommand === 'coverage') {
-      try {
-        writeAtomic(io, path.resolve(root, verdictRel), verdictText(STATUS.ERROR, 'coverage'), seq++);
-      } catch (e2) {
-        // the verdict could not be written at all; the failure below still reports it
-      }
-    }
-    return loopFailure(subcommand, 'write_failed', `${subcommand}: could not write output: ${errMessage(e)}`, written, error);
+    return { code: LOOP_CODES.WRITE_FAILED, message: `${subcommand}: could not prepare output directory: ${errMessage(e)}` };
   }
+  return null;
+}
 
-  const result = {
+/**
+ * `select` writes the verdict FIRST (coverage pending) so a later failure can
+ * never leave a stale `coverage: complete`, then APPLICABLE.md, then CONFLICTS.json.
+ */
+function writeSelectOutputs({ ev, config, put }) {
+  put(ev.verdictRel, verdictText(ev, STATUS.PENDING, 'select'));
+  const rendered = applicableText(ev, config);
+  put(APPLICABLE_PATH, rendered.text);
+  const applicableSet = new Set(ev.applicableIds);
+  const orders = ev.loadedOrders.orders;
+  const conflictsDoc = {
+    schema: REPORT_SCHEMA,
+    phase: ev.phaseRel,
+    status: ev.block.status,
+    reasons: ev.block.reasons,
+    conflicts: orders.conflicts.map((c) => ({ ...c, applicable: Array.isArray(c.orders) && c.orders.some((id) => applicableSet.has(id)) })),
+    missingChecks: orders.missingChecks.map((m) => ({ ...m, applicable: applicableSet.has(m.id) })),
+    errors: orders.errors,
+    warnings: ev.warnings,
+  };
+  put(CONFLICTS_PATH, JSON.stringify(conflictsDoc, null, 2) + '\n');
+  return rendered.omitted;
+}
+
+function writeCoverageOutputs({ ev, put }) {
+  put(ev.verdictRel, verdictText(ev, ev.cov.status, 'coverage'));
+}
+
+function buildLoopResult({ subcommand, ev, omitted, written }) {
+  return {
     schema: REPORT_SCHEMA,
     subcommand,
     ok: true,
     disabled: false,
-    phase: { dir: phaseRel, reqIds },
-    conflicts: block.status,
-    coverage: coverageStatus,
-    reasons,
-    applicable: applicableIds,
+    phase: { dir: ev.phaseRel, reqIds: ev.reqIds },
+    conflicts: ev.block.status,
+    coverage: ev.coverageStatus,
+    reasons: ev.reasons,
+    applicable: ev.applicableIds,
     omitted,
-    uncited,
-    unrelatedConflicts: block.unrelatedConflicts,
-    errors: loadedOrders.orders.errors,
-    warnings,
+    uncited: ev.uncited,
+    unrelatedConflicts: ev.block.unrelatedConflicts,
+    errors: ev.loadedOrders.orders.errors,
+    warnings: ev.warnings,
     written,
   };
-  emit(result);
+}
+
+function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
+  const parsed = parseLoopFlags(subcommand, rest);
+  if (parsed.usage !== undefined) return loopFailure(subcommand, LOOP_CODES.USAGE, parsed.usage, [], error);
+  const options = parsed.options;
+  const rawOut = raw === true || options.raw;
+
+  const root = path.resolve(cwd);
+  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
+  if (!config.enabled) {
+    const result = { schema: REPORT_SCHEMA, subcommand, ok: true, disabled: true, message: DISABLED_MESSAGE, written: [] };
+    io.log(rawOut ? JSON.stringify(result) : DISABLED_MESSAGE);
+    return result;
+  }
+
+  const phase = resolvePhaseDir({ options, root, io });
+  if (!phase.ok) return loopFailure(subcommand, phase.code, phase.message, [], error);
+  const bad = containPhaseDir(root, phase.phaseDir, io);
+  if (bad !== null) return loopFailure(subcommand, bad.code, bad.message, [], error);
+  const reqIds = options.reqIds !== null ? splitReqIds(options.reqIds) : phase.reqIds;
+
+  const ev = evaluateLoop({ subcommand, options, root, phaseDir: phase.phaseDir, reqIds, config, io });
+
+  if (subcommand === 'select') {
+    const unusable = prepareOutputDir({ subcommand, root, io });
+    if (unusable !== null) return loopFailure(subcommand, unusable.code, unusable.message, [], error);
+  }
+
+  const written = [];
+  let seq = 0;
+  const put = (rel, text) => {
+    writeAtomic(io, path.resolve(root, rel), text, seq++);
+    written.push(rel);
+  };
+  let omitted = [];
+  try {
+    if (subcommand === 'select') omitted = writeSelectOutputs({ ev, config, put });
+    else if (subcommand === 'coverage') writeCoverageOutputs({ ev, put });
+  } catch (e) {
+    if (subcommand === 'coverage') {
+      try {
+        writeAtomic(io, path.resolve(root, ev.verdictRel), verdictText(ev, STATUS.ERROR, 'coverage'), seq++);
+      } catch (e2) {
+        // the verdict could not be written at all; the failure below still reports it
+      }
+    }
+    return loopFailure(subcommand, LOOP_CODES.WRITE_FAILED, `${subcommand}: could not write output: ${errMessage(e)}`, written, error);
+  }
+
+  const result = buildLoopResult({ subcommand, ev, omitted, written });
+  if (rawOut) io.log(JSON.stringify(result));
+  else for (const l of humanLoopLines(result)) io.log(l);
   return result;
 }
 
@@ -469,7 +530,7 @@ function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = fals
     } catch (e) {
       const message = `${FAMILY} ${subcommand}: internal error: ${errMessage(e)}`;
       error(message);
-      return { schema: REPORT_SCHEMA, subcommand, ok: false, errors: [{ code: 'internal_error', message }], written: [] };
+      return { schema: REPORT_SCHEMA, subcommand, ok: false, errors: [{ code: LOOP_CODES.INTERNAL_ERROR, message }], written: [] };
     }
   }
   if (subcommand !== 'validate') {
@@ -503,7 +564,7 @@ function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = fals
 /** Exit code for the direct CLI: 0 ok; 2 the file could not be read; 1 otherwise. */
 function exitCodeFor(report) {
   if (LOOP_SUBCOMMANDS.includes(report.subcommand)) {
-    if (report.ok === false) return Array.isArray(report.errors) && report.errors.some((e) => e.code === 'usage') ? 1 : 2;
+    if (report.ok === false) return Array.isArray(report.errors) && report.errors.some((e) => e.code === LOOP_CODES.USAGE) ? 1 : 2;
     if (report.disabled === true) return 0;
     if (report.conflicts === STATUS.BLOCKED || report.coverage === STATUS.INCOMPLETE || report.coverage === STATUS.ERROR) return 1;
     return 0;
@@ -523,4 +584,4 @@ if (require.main === module) {
   process.exitCode = exitCodeFor(report);
 }
 
-module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA };
+module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA, LOOP_CODES };

@@ -114,7 +114,7 @@ describe('router loop subcommands', () => {
     const applicable = m.read(APPLICABLE_PATH);
     assert.ok(applicable.includes('BILL-RULE'));
     assert.ok(!applicable.includes('UI-RULE'));
-    assert.deepEqual(r.written, [APPLICABLE_PATH, CONFLICTS_PATH, VERDICT]);
+    assert.deepEqual(r.written, [VERDICT, APPLICABLE_PATH, CONFLICTS_PATH]);
     assert.equal(r.phase.dir, PHASE);
     assert.equal(r.conflicts, 'clear');
     assert.equal(r.coverage, 'pending');
@@ -438,5 +438,44 @@ describe('router loop subcommands', () => {
     assert.equal(r.ok, false);
     assert.equal(r.errors[0].code, 'path_outside_cwd');
     assert.deepEqual(m.calls.rename, []);
+  });
+
+  // A later write failure must never leave a stale `coverage: complete` behind.
+  it('selectWritesVerdictBeforeOtherFiles', () => {
+    const stale = '---\nschema: "1"\nphase: "03-billing"\nconflicts: clear\ncoverage: complete\ngenerated_by: coverage\napplicable: ""\n---\n\nold\n';
+    const m = setup({ files: { [VERDICT]: stale } });
+    const realWrite = m.deps.writeFile;
+    m.deps.writeFile = (p, text) => {
+      if (path.basename(p).startsWith('APPLICABLE.md')) throw new Error('disk full');
+      return realWrite(p, text);
+    };
+    const r = run(m, 'select');
+    assert.equal(r.ok, false);
+    assert.equal(r.errors[0].code, 'write_failed');
+    assert.deepEqual(r.written, [VERDICT]);
+    const lines = m.read(VERDICT).split('\n');
+    assert.ok(lines.includes('coverage: pending'), lines.join('|'));
+    assert.ok(!lines.includes('coverage: complete'));
+    assert.equal(m.has(APPLICABLE_PATH), false);
+  });
+
+  it('applicableMdSaysWhenOrdersUnusable', () => {
+    const header =
+      '# Applicable standing orders — phase 03-billing\n\n' +
+      "These orders apply in addition to the phase's own must_haves, never instead of them. Cite each order id in must_haves; never list an order's check target in files_modified.\n\n";
+    const footer = '0 applicable order(s) omitted to stay within the byte cap.\n';
+    const notice = (state) => `ORDERS.yaml could not be used (${state}): planning is blocked until it is fixed. Run standing-orders validate.\n`;
+
+    const invalid = setup({ orders: 'version: 1\norders: not-a-list\n' });
+    assert.equal(run(invalid, 'select').ok, true);
+    assert.equal(invalid.read(APPLICABLE_PATH), header + notice('invalid') + footer);
+
+    const unreadable = setup({ links: { [ORDERS]: '/etc/outside' } });
+    assert.equal(run(unreadable, 'select').ok, true);
+    assert.equal(unreadable.read(APPLICABLE_PATH), header + notice('unreadable') + footer);
+
+    const missing = setup({ orders: null });
+    run(missing, 'select');
+    assert.equal(missing.read(APPLICABLE_PATH), header + footer);
   });
 });

@@ -222,3 +222,33 @@ describe('gate renderVerdict', () => {
     assert.ok(text.endsWith('\n') && !text.endsWith('\n\n'));
   });
 });
+
+describe('gate robustness', () => {
+  it('gateIgnoresMalformedEntries', () => {
+    const block = evaluateBlock({
+      orders: { state: 'ok', errors: [], conflicts: [null, 'x', 7, CONFLICT], missingChecks: [null, 'y', { id: 'A-1', check_target: 'src/a.js' }] },
+      applicableIds: ['REFUND-AMOUNT-A', 'A-1'],
+      blockOn: 'conflict_or_missing',
+    });
+    assert.equal(block.status, 'blocked');
+    assert.deepEqual(block.blockingConflicts, [CONFLICT]);
+    assert.deepEqual(block.blockingMissingChecks, [{ id: 'A-1', check_target: 'src/a.js' }]);
+    assert.deepEqual(block.reasons.map((r) => r.code), ['conflict', 'missing_check']);
+
+    const noIds = evaluateBlock({ orders: okOrders({ conflicts: [CONFLICT] }), applicableIds: 'REFUND-AMOUNT-A', blockOn: 'conflict' });
+    assert.equal(noIds.status, 'clear');
+    assert.deepEqual(noIds.unrelatedConflicts, [CONFLICT]);
+
+    const cov = evaluateCoverage({ applicableIds: ['A-1'], ordersTotal: 1, plans: [null, 'p', 3, plan('01-PLAN.md', ['A-1'])] });
+    assert.equal(cov.status, 'complete');
+    assert.deepEqual(cov.uncited, []);
+    assert.deepEqual(cov.unreadablePlans, []);
+
+    const onlyJunk = evaluateCoverage({ applicableIds: ['A-1'], ordersTotal: 1, plans: [null, 'p'] });
+    assert.equal(onlyJunk.status, 'incomplete');
+    assert.deepEqual(onlyJunk.reasons.map((r) => r.code), ['no_plans']);
+
+    const badIds = evaluateCoverage({ applicableIds: 'A-1', ordersTotal: 1, plans: [plan('01-PLAN.md', [])] });
+    assert.equal(badIds.status, 'complete');
+  });
+});
