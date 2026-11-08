@@ -124,6 +124,7 @@ A `test`-tier order whose `check_target` does not exist under the project root i
 - A header stating that the orders apply **in addition to** the phase's own `must_haves`, never instead of them.
 - Orders in deterministic order: `test` tier before `backstop`, then by `id`.
 - Whole orders are packed while the total, including the footer, stays within `standing-orders.max_bytes` (default 6000) measured in UTF-8 bytes. An order is never truncated mid-body.
+- Each order block ends with a `- Project as:` line: the exact `must_haves` item the planner copies into a plan (see *Projection*).
 - Every rendered scalar is one line; control characters are replaced with U+FFFD.
 - A footer always states `N applicable order(s) omitted to stay within the byte cap.` (The cap value itself is not embedded, so the footer's length depends only on the count.)
 
@@ -133,7 +134,7 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts` and `coverage` write nothing. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
+| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts`, `coverage` and `enforce` write nothing. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
 | `standing-orders.block_on` | enum | `conflict` | What blocks planning. An unknown value falls back to `conflict` with warning `config_invalid`. |
 | `standing-orders.max_bytes` | number | `6000` | UTF-8 byte cap for `APPLICABLE.md`. Must be a whole number ≥ 0; anything else (including the string `"6000"`) falls back to `6000` with warning `config_invalid`. |
 
@@ -144,13 +145,15 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 | Point | Hook | What it does |
 |---|---|---|
 | `plan:pre` | step `standing-orders select` | Writes `APPLICABLE.md`, `CONFLICTS.json` and the phase verdict with `coverage: pending`. |
-| `plan:pre` | contribution into `planner` | Tells the planner to run `select` itself, stop on a block, read `APPLICABLE.md`, cite every applicable order in `must_haves`, and never list a check target in `files_modified`. |
+| `plan:pre` | contribution into `planner` | Tells the planner to run `select` itself, stop on a block, read `APPLICABLE.md`, project every applicable order into a plan's `must_haves`, and never list a check file in `files_modified`. |
 | `plan:pre` | gate, blocking | `conflicts == clear` in the verdict. |
-| `plan:post` | step `standing-orders coverage` | Recomputes conflicts and citations from the written plans; rewrites the verdict. |
+| `plan:post` | step `standing-orders coverage` | Recomputes conflicts, citations, projections and check-file edits from the written plans; rewrites the verdict. |
 | `plan:post` | gate, blocking | `conflicts == clear`. |
 | `plan:post` | gate, blocking | `coverage == complete`. |
+| `execute:wave:post` | step `standing-orders enforce` | Runs every applicable `test` order's check through gsd-core's fail-first prover; writes `ENFORCEMENT.json` and the verdict's `enforcement`. |
+| `execute:wave:post` | gate, blocking | `enforcement == clear`. |
 
-Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not yet run third-party `plan:pre` command steps or gates ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)); until it does, the planner-run `select` is the `plan:pre` check and the `plan:post` gates are the mechanical block (ADR-0001 A5).
+Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not yet run third-party `plan:pre` command steps or gates ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)); until it does, the planner-run `select` is the `plan:pre` check and the `plan:post` gates are the mechanical block (ADR-0001 A5). There is no `verify:pre` hook: orders reach `gsd-verifier` as projected `must_haves` (ADR-0001 A6, [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984)).
 
 ## Phase inputs
 
@@ -159,6 +162,10 @@ Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not ye
 - **Requirements.** The phase's requirement ids plus every plan's `requirements`.
 - **Plans.** `*-PLAN.md` in the phase directory. Their frontmatter is parsed like `ORDERS.yaml` (anchors and aliases refused, every scalar a string). A plan whose frontmatter cannot be read makes coverage `incomplete` (`plan_unreadable`): what cannot be read cannot be counted as covered.
 - **Citation.** An order is cited when its id appears in a string anywhere under a plan's `must_haves`, as a whole token: the characters around it must not be letters, digits, `_` or `-`. `REFUND-A` is not cited by `REFUND-AB`. A citation is a mention, not a judgement: whether the plan actually honors the order is graded at verification.
+- **Projection.** Every applicable order must also appear as a structured `must_haves` item in some plan, written exactly as `APPLICABLE.md`'s `Project as` line gives it:
+  - a `test` order as a `prohibitions` item `{statement: "<id>: <statement>", status: resolved, verification: test, check_kind, check_target}` (plus `check_rule` for `lint-rule` and the fixtures when the order has them). It counts when the statement starts with `<id>:`, `status` is `resolved`, `verification` is `test`, `check_kind` matches, `check_target` and each fixture the order has match (paths compared as below), and for `lint-rule` `check_rule` matches;
+  - a `backstop` order as a `truths` item `{statement: "<id>: <statement>", verification: backstop}`. It counts when the statement starts with `<id>:` and `verification` is `backstop`. `gsd-verifier` reports such a truth `insufficient_spec`, never passed.
+- **Check files.** For an applicable `test` order: its `check_target` when `check_kind` is `node-test`, and its `check_violation_fixture` and `check_clean_fixture` for either kind. A `lint-rule` order's `check_target` is the code the rule lints, so it is not a check file. Paths are compared canonically: surrounding whitespace trimmed, backslashes to `/`, `.` and `..` segments resolved, repeated and trailing `/` removed, leading `./` removed, and **case ignored** (macOS and Windows file systems ignore it, so `Tests/X.test.cjs` names the same file). Otherwise they must be equal: `tests/x.test.cjs.bak` is a different file.
 - **Unusable rules.** When `ORDERS.yaml` is invalid or unreadable, `APPLICABLE.md` says so on its own line (`ORDERS.yaml could not be used (<state>): planning is blocked until it is fixed. Run standing-orders validate.`), so the planner never reads an empty list as "no rules apply". `select` writes the verdict first, then `APPLICABLE.md`, then `CONFLICTS.json`.
 
 ## Blocking rules
@@ -181,6 +188,8 @@ A missing `ORDERS.yaml` is not a block: it means there are no rules yet (warning
 | `plan_unreadable` | A plan's frontmatter could not be read. |
 | `no_plans` | At least one order applies and the phase has no plans. |
 | `uncited` | An applicable order is cited by no plan's `must_haves`. |
+| `not_projected` | An applicable order is cited but no readable plan has its projection (see *Projection*). An uncited order is reported `uncited` only. |
+| `check_file_modified` | A plan lists a check file of an applicable `test` order in `files_modified`. Checks are fixed before the implementing phase. |
 
 ## Verdict file: `<phase dir>/STANDING-ORDERS.md`
 
@@ -192,6 +201,7 @@ schema: "1"
 phase: "03-billing"
 conflicts: clear
 coverage: pending
+enforcement: pending
 generated_by: select
 applicable: "REFUND-IDEMPOTENT, REFUND-AMOUNT-A"
 ---
@@ -201,26 +211,55 @@ applicable: "REFUND-IDEMPOTENT, REFUND-AMOUNT-A"
 - **coverage** — one of: `pending` | `complete` | `incomplete` | `error`
   - `pending`: written by `select` at the start of every planning run, so an earlier `complete` can never carry over.
   - `error`: `coverage` failed after resolving the phase; the gate blocks.
+- **enforcement** — one of: `pending` | `clear` | `flagged` | `error`
+  - `pending`: written by `select` and `coverage`, and by `enforce` before it runs any check, so a run that never finishes cannot leave a stale `clear`.
+  - `clear`: every applicable `test` order was proven (or there are none).
+  - `flagged`: at least one applicable `test` order was not proven.
+  - `error`: `ORDERS.yaml` was invalid or unreadable, or `enforce` could not write its results.
 
 The body lists one `- <reason code>: <message>` line per finding, or `- no blocking findings`.
 
-## Commands: `standing-orders select | conflicts | coverage`
+## Enforcement
+
+`standing-orders enforce` runs, for each applicable `test` order in applicable order, gsd-core's fail-first prover:
+
+```
+gsd-tools check prohibition-enforcement --json '{"prohibition":{"id","statement","status":"resolved","verification":"test"},"check":{"kind","target","rule"?,"violationFixture"?,"cleanFixture"?}}'
+```
+
+with the project root as working directory (no shell; the statement is cut to 500 characters). Each call is bounded at 180 s. An order is **proven** only when the host answers `status: green` and `flagged: false`. A check that passes on its violation fixture is not fail-first, and the host reports it `unverified`, `flagged` — so is it here. Every failure to get a verdict is `flagged`, never a pass:
+
+| Reason prefix | Meaning |
+|---|---|
+| `host_unavailable` | No gsd-tools CLI was found (`GSD_TOOLS`, or the dispatching `gsd-tools`). |
+| `host_timeout` | No verdict within 180 s. |
+| `host_failed` | The host exited non-zero; the message carries the exit status and the first line of its stderr. |
+| `host_output_invalid` | The host's output was not a JSON object. |
+| `request_too_large` | The request would exceed 28 000 characters on the command line; it was not sent. |
+
+Any other reason is the host's own. `.planning/standing-orders/ENFORCEMENT.json` is `{ schema: 1, phase, status, results }`; each result is `{ id, status, flagged, reason, located, kind, evidence }` as the host returned it. Each unproven order adds an `enforcement_flagged` reason to the verdict body.
+
+`block_on` does not apply to enforcement: it decides what blocks planning only.
+
+## Commands: `standing-orders select | conflicts | coverage | enforce`
 
 ```
 gsd-tools standing-orders select    (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
 gsd-tools standing-orders conflicts (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
 gsd-tools standing-orders coverage  (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
+gsd-tools standing-orders enforce   (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
 ```
 
 - `standing-orders select` writes `.planning/standing-orders/APPLICABLE.md`, `.planning/standing-orders/CONFLICTS.json` and the verdict (`coverage: pending`).
 - `standing-orders conflicts` computes the same blocking decision and writes nothing.
 - `standing-orders coverage` writes only the verdict, with `conflicts` recomputed and `coverage` decided.
+- `standing-orders enforce` writes the verdict (`enforcement: pending` first, then the result, with `conflicts` and `coverage` recomputed) and `.planning/standing-orders/ENFORCEMENT.json`.
 - `--ws <name>` is accepted and ignored (the host has already applied it through `GSD_WORKSTREAM`). Any other flag, a positional argument, a flag without its value, or giving both or neither of `--phase` and `--phase-dir` is a usage error.
 - Writes are atomic (temporary file, then rename).
-- With `--raw`, one JSON line: `{ schema: 1, subcommand, ok, disabled, phase: { dir, reqIds }, conflicts, coverage, reasons, applicable, omitted, uncited, unrelatedConflicts, errors, warnings, written }`. `ok` false means the command could not look (codes below), not that it blocked. Disabled: `{ schema: 1, subcommand, ok: true, disabled: true, message, written: [] }`.
+- With `--raw`, one JSON line: `{ schema: 1, subcommand, ok, disabled, phase: { dir, reqIds }, conflicts, coverage, enforcement, reasons, applicable, omitted, uncited, notProjected, checkFileEdits, unrelatedConflicts, errors, warnings, written }`, plus `results` for `enforce`. `enforcement` is `null` for `conflicts` and `pending` for `select` and `coverage`. `ok` false means the command could not look (codes below), not that it blocked. Disabled: `{ schema: 1, subcommand, ok: true, disabled: true, message, written: [] }`.
 - `CONFLICTS.json` is `{ schema: 1, phase, status, reasons, conflicts, missingChecks, errors, warnings }`; each conflict and missing check carries `applicable: true|false`.
 
-Direct-CLI exit codes for these three: 0 clear (or disabled); 1 blocked, coverage `incomplete` or `error`, or a usage error; 2 could not look (phase unresolved, path outside the project, write failed).
+Direct-CLI exit codes for these four: 0 clear (or disabled); 1 blocked, coverage `incomplete` or `error`, enforcement `flagged` or `error`, or a usage error; 2 could not look (phase unresolved, path outside the project, write failed).
 
 | Code | Severity | Meaning |
 |---|---|---|

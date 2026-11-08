@@ -9,8 +9,8 @@ Before you write any plan:
 
 While planning:
 
-- Cite every applicable order's id in the `must_haves` of at least one plan (for example a `truths` entry such as "REFUND-IDEMPOTENT: a refund for one payment runs at most once"). A plan:post gate rejects the phase if an applicable order is not cited.
-- If your plans touch files that no planning document named, run the `select` command again after writing them: new files can make more orders applicable, and each of those must be cited too.
-- Never list an order's check target in `files_modified`. Checks are written before the implementing phase so the executor cannot shape them to its code.
-- A `backstop` order has no mechanical check yet. Plan the behavior it states anyway; verification reports it as `insufficient_spec`.
+- Project every applicable order into the `must_haves` of at least one plan. Each block in `APPLICABLE.md` has a `Project as` line naming the `must_haves` section and the exact item: copy that item into that section of a plan as a YAML mapping with the same keys and values. A `test` order becomes a `prohibitions` mapping and a `backstop` order becomes a `truths` mapping. A plan:post gate rejects the phase if an applicable order is not projected, and a mention of its id is not a projection.
+- If your plans touch files that no planning document named, run the `select` command again after writing them: new files can make more orders applicable, and each of those must be projected too.
+- Never list a check file in `files_modified`: a node-test check target, or a violation or clean fixture. Checks are written before the implementing phase so the executor cannot shape them to its code, and the plan:post gate rejects a plan that lists one.
+- A `backstop` order has no mechanical check yet. Plan the behavior it states anyway; the verifier reports it as `insufficient_spec`. A `test` order is proven by the enforce gate after each wave.
 </standing_orders>

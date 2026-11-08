@@ -48,3 +48,18 @@ describe('references/standing-orders.md parity', () => {
     }
   });
 });
+
+describe('references/standing-orders.md phase 3 parity', () => {
+  it('referenceDocListsPhase3CodesAndCommand', () => {
+    const { SUBCOMMANDS } = require('../standing-orders-router.cjs');
+    const { STATUS } = require('../lib/gate.cjs');
+    assert.ok(SUBCOMMANDS.includes('enforce'));
+    assert.ok(DOC.includes('`standing-orders enforce`'), 'reference doc documents the enforce subcommand');
+    for (const code of ['check_file_modified', 'not_projected', 'enforcement_flagged']) {
+      assert.ok(DOC.includes('`' + code + '`'), `reference doc documents verdict reason ${code}`);
+    }
+    assert.ok(DOC.includes('`' + STATUS.FLAGGED + '`'), 'reference doc documents the flagged status');
+    assert.ok(DOC.includes('ENFORCEMENT.json'), 'reference doc names the enforcement report');
+    assert.ok(DOC.includes('`enforcement`'), 'reference doc documents the enforcement verdict field');
+  });
+});

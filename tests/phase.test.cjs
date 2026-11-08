@@ -233,3 +233,207 @@ describe('phase', () => {
     });
   });
 });
+
+const { projectionOf, isProjected, protectedFiles, normalizeToken } = require('../lib/phase.cjs');
+const { testOrder, order } = require('./helpers/fixtures.cjs');
+
+describe('phase projection', () => {
+  const FULL = testOrder({
+    id: 'T-1',
+    statement: 'Never double refund.',
+    check_target: 'tests/x.test.cjs',
+    check_violation_fixture: 'tests/fixtures/bad.js',
+    check_clean_fixture: 'tests/fixtures/good.js',
+  });
+  const BACKSTOP = order({ id: 'B-1', statement: 'Be fair.' });
+
+  it('exportsNormalizeToken', () => {
+    assert.equal(typeof normalizeToken, 'function');
+    assert.equal(normalizeToken('./a//b\\c'), 'a/b/c');
+  });
+
+  it('projectionOfTestOrder', () => {
+    assert.deepEqual(projectionOf(FULL), {
+      section: 'prohibitions',
+      item: {
+        statement: 'T-1: Never double refund.',
+        status: 'resolved',
+        verification: 'test',
+        check_kind: 'node-test',
+        check_target: 'tests/x.test.cjs',
+        check_violation_fixture: 'tests/fixtures/bad.js',
+        check_clean_fixture: 'tests/fixtures/good.js',
+      },
+    });
+    const lint = testOrder({ id: 'L-1', statement: 'No eval.', check_kind: 'lint-rule', check_target: 'src/billing/refund.js', check_rule: 'local/no-eval' });
+    assert.deepEqual(projectionOf(lint).item, {
+      statement: 'L-1: No eval.',
+      status: 'resolved',
+      verification: 'test',
+      check_kind: 'lint-rule',
+      check_target: 'src/billing/refund.js',
+      check_rule: 'local/no-eval',
+      check_violation_fixture: 'tests/fixtures/bad.js',
+      check_clean_fixture: 'tests/fixtures/good.js',
+    });
+  });
+
+  it('projectionOfOmitsEmptyOptionals', () => {
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    const bare = testOrder({ id: 'T-2', statement: 'S.', check_violation_fixture: null, check_clean_fixture: null });
+    assert.deepEqual(projectionOf(bare).item, {
+      statement: 'T-2: S.',
+      status: 'resolved',
+      verification: 'test',
+      check_kind: 'node-test',
+      check_target: 'tests/x.test.cjs',
+    });
+    const stray = testOrder({ id: 'T-3', statement: 'S.', check_rule: 'local/stray', check_violation_fixture: '', check_clean_fixture: 7 });
+    const item = projectionOf(stray).item;
+    assert.equal(has(item, 'check_rule'), false, 'a node-test never carries a rule');
+    assert.equal(has(item, 'check_violation_fixture'), false);
+    assert.equal(has(item, 'check_clean_fixture'), false);
+    const emptyRule = testOrder({ id: 'L-2', statement: 'S.', check_kind: 'lint-rule', check_rule: '' });
+    assert.equal(has(projectionOf(emptyRule).item, 'check_rule'), false);
+    const noTarget = testOrder({ id: 'T-4', statement: 'S.', check_target: null });
+    assert.equal(projectionOf(noTarget).item.check_target, '');
+  });
+
+  it('projectionOfBackstop', () => {
+    assert.deepEqual(projectionOf(BACKSTOP), { section: 'truths', item: { statement: 'B-1: Be fair.', verification: 'backstop' } });
+    assert.equal(projectionOf({ id: 'X-1', statement: 'S.', verification: 'judgment' }).section, 'truths');
+    assert.doesNotThrow(() => projectionOf({}));
+  });
+
+  it('isProjectedTestMatch', () => {
+    assert.equal(isProjected(FULL, { prohibitions: [projectionOf(FULL).item] }), true);
+    assert.equal(isProjected(FULL, { truths: ['x'], prohibitions: ['y', projectionOf(FULL).item] }), true);
+  });
+
+  it('isProjectedNormalizesTarget', () => {
+    for (const spelled of ['./tests/x.test.cjs', 'tests\\x.test.cjs', 'tests//x.test.cjs']) {
+      const item = { ...projectionOf(FULL).item, check_target: spelled };
+      assert.equal(isProjected(FULL, { prohibitions: [item] }), true, spelled);
+    }
+  });
+
+  it('isProjectedRejectsMismatches', () => {
+    const good = projectionOf(FULL).item;
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, verification: 'judgment' }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, check_kind: 'lint-rule' }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, check_target: 'tests/other.test.cjs' }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, statement: 'T-1-X: Never double refund.' }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, statement: 'XT-1: Never double refund.' }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, statement: 'T-2: Never double refund.' }] }), false);
+    assert.equal(isProjected(FULL, { truths: [good] }), false, 'a test order is projected into prohibitions, not truths');
+  });
+
+  it('isProjectedHostileShapes', () => {
+    const good = projectionOf(FULL).item;
+    const shapes = [null, undefined, 'text', 7, [], [good], {}, { prohibitions: 'x' }, { prohibitions: {} }, { prohibitions: null }, { prohibitions: [1, 'T-1: x', null, [], undefined] }];
+    for (const mustHaves of shapes) {
+      assert.doesNotThrow(() => isProjected(FULL, mustHaves));
+      assert.equal(isProjected(FULL, mustHaves), false, JSON.stringify(mustHaves));
+    }
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, statement: 5 }] }), false);
+    assert.equal(isProjected(FULL, { prohibitions: [{ ...good, statement: undefined }] }), false);
+    const numeric = testOrder({ id: '12', statement: 'S.' });
+    assert.equal(isProjected(numeric, { prohibitions: [projectionOf(numeric).item] }), true, 'a number-like id still projects');
+  });
+
+  it('isProjectedBackstop', () => {
+    const item = projectionOf(BACKSTOP).item;
+    assert.equal(isProjected(BACKSTOP, { truths: [item] }), true);
+    assert.equal(isProjected(BACKSTOP, { truths: ['B-1: Be fair.'] }), false, 'a plain string citation is not a projection');
+    assert.equal(isProjected(BACKSTOP, { truths: [{ statement: 'B-1: Be fair.' }] }), false);
+    assert.equal(isProjected(BACKSTOP, { truths: [{ statement: 'B-1: Be fair.', verification: 'judgment' }] }), false);
+    assert.equal(isProjected(BACKSTOP, { prohibitions: [item] }), false);
+    assert.equal(isProjected(BACKSTOP, { truths: [{ statement: 'B-10: Be fair.', verification: 'backstop' }] }), false);
+  });
+
+  it('protectedFilesNodeTest', () => {
+    assert.deepEqual(protectedFiles(FULL), ['tests/x.test.cjs', 'tests/fixtures/bad.js', 'tests/fixtures/good.js']);
+    const spelled = testOrder({
+      id: 'T-5',
+      check_target: './tests/x.test.cjs',
+      check_violation_fixture: 'tests\\fixtures\\bad.js',
+      check_clean_fixture: './tests/fixtures/bad.js',
+    });
+    assert.deepEqual(protectedFiles(spelled), ['tests/x.test.cjs', 'tests/fixtures/bad.js']);
+    const sparse = testOrder({ id: 'T-6', check_violation_fixture: '', check_clean_fixture: 'tests/fixtures/good.js' });
+    assert.deepEqual(protectedFiles(sparse), ['tests/x.test.cjs', 'tests/fixtures/good.js']);
+  });
+
+  it('protectedFilesLintRuleExcludesTarget', () => {
+    const lint = testOrder({ id: 'L-1', check_kind: 'lint-rule', check_target: 'src/billing/refund.js', check_rule: 'local/r' });
+    assert.deepEqual(protectedFiles(lint), ['tests/fixtures/bad.js', 'tests/fixtures/good.js']);
+    const lintNoFixtures = testOrder({ id: 'L-2', check_kind: 'lint-rule', check_target: 'src/a.js', check_rule: 'local/r', check_violation_fixture: null, check_clean_fixture: null });
+    assert.deepEqual(protectedFiles(lintNoFixtures), []);
+  });
+
+  it('protectedFilesBackstopEmpty', () => {
+    const backstop = order({ id: 'B-2', check_kind: 'node-test', check_target: 'tests/x.test.cjs', check_violation_fixture: 'tests/fixtures/bad.js', check_clean_fixture: 'tests/fixtures/good.js' });
+    assert.deepEqual(protectedFiles(backstop), []);
+    assert.deepEqual(protectedFiles({ id: 'J', verification: 'judgment', check_target: 'x' }), []);
+    assert.deepEqual(protectedFiles({}), []);
+  });
+});
+
+describe('phase canonical paths and strict projection', () => {
+  const { canonicalPath, projectionOf: projOf, isProjected: isProj } = require('../lib/phase.cjs');
+  const SPELLINGS = ['./tests/a.test.cjs', 'tests/./a.test.cjs', 'tests/x/../a.test.cjs', 'Tests/A.test.cjs', 'tests/a.test.cjs/', ' tests/a.test.cjs ', 'tests\\a.test.cjs', 'tests//a.test.cjs'];
+
+  it('canonicalPathCases', () => {
+    const want = canonicalPath('tests/a.test.cjs');
+    assert.equal(want, 'tests/a.test.cjs');
+    for (const s of SPELLINGS) assert.equal(canonicalPath(s), want, s);
+    assert.notEqual(canonicalPath('tests/a.test.cjs.bak'), want);
+    assert.notEqual(canonicalPath('tests/b.test.cjs'), want);
+    assert.equal(canonicalPath(''), '');
+    assert.equal(canonicalPath('.'), '');
+  });
+
+  describe('isProjectedIsStrict', () => {
+    const T = testOrder({ id: 'T-1', statement: 'Never double refund.', check_target: 'tests/a.test.cjs', check_violation_fixture: 'tests/fixtures/bad.js', check_clean_fixture: 'tests/fixtures/good.js' });
+    const good = projOf(T).item;
+    const ok = (item, o = T) => isProj(o, { prohibitions: [item] });
+
+    it('requiresIdPrefix', () => {
+      assert.equal(ok(good), true);
+      assert.equal(ok({ ...good, statement: 'we do not follow T-1 at all' }), false);
+      assert.equal(ok({ ...good, statement: '  T-1: Never double refund.' }), true);
+      const b = order({ id: 'B-1', statement: 'Be fair.' });
+      assert.equal(isProj(b, { truths: [{ statement: 'we do not follow B-1 at all', verification: 'backstop' }] }), false);
+    });
+
+    it('requiresResolvedStatus', () => {
+      assert.equal(ok({ ...good, status: 'pending' }), false);
+      const { status, ...noStatus } = good;
+      assert.equal(ok(noStatus), false);
+    });
+
+    it('requiresFixtures', () => {
+      const { check_violation_fixture: v, ...noViolation } = good;
+      const { check_clean_fixture: c, ...noClean } = good;
+      assert.equal(ok(noViolation), false);
+      assert.equal(ok(noClean), false);
+      assert.equal(ok({ ...good, check_violation_fixture: 'tests/fixtures/other.js' }), false);
+      assert.equal(ok({ ...good, check_clean_fixture: 'tests/fixtures/other.js' }), false);
+    });
+
+    it('requiresRule', () => {
+      const L = testOrder({ id: 'L-1', statement: 'No eval.', check_kind: 'lint-rule', check_target: 'src/a.js', check_rule: 'local/no-eval' });
+      const item = projOf(L).item;
+      assert.equal(ok(item, L), true);
+      assert.equal(ok({ ...item, check_rule: 'local/other' }, L), false);
+    });
+
+    it('acceptsEquivalentSpellings', () => {
+      for (const s of SPELLINGS) {
+        assert.equal(ok({ ...good, check_target: s }), true, s);
+        const fx = s.replace(/a\.test\.cjs/i, 'fixtures/bad.js');
+        assert.equal(ok({ ...good, check_violation_fixture: fx }), true, fx);
+      }
+    });
+  });
+});

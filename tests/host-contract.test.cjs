@@ -153,6 +153,10 @@ gated('manifestValidates', () => {
   assert.deepEqual(v.validateCapability(cap, 'standing-orders'), []);
   assert.deepEqual(v.validateAgainstContract(cap, 'standing-orders'), []);
   assert.deepEqual(v.materializeHookFragments(cap, dir), []);
+  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'validate']);
+  assert.equal(cap.engines.gsd, '>=1.19.0 <2.0.0');
+  assert.ok(cap.steps.some((s) => s.point === 'execute:wave:post' && s.ref.command === 'standing-orders enforce'));
+  assert.ok(cap.gates.some((g) => g.point === 'execute:wave:post' && g.check.predicate.field === 'enforcement' && g.check.predicate.equals === 'clear'));
 });
 
 gated('installsFromLocalPathAndDispatches', () => {
@@ -165,6 +169,12 @@ gated('installsFromLocalPathAndDispatches', () => {
   const report = JSON.parse(lines[0]);
   assert.equal(report.schema, 1);
   assert.equal(report.errors[0].code, 'file_not_found');
+  // enforce is dispatched through gsd-tools like the other subcommands (disabled project: reports and writes nothing)
+  const enforceOut = run(['standing-orders', 'enforce', '--phase', '3', '--raw'], project.cwd, project.home);
+  const enforceReport = lastJson(enforceOut);
+  assert.equal(enforceReport.subcommand, 'enforce', enforceOut);
+  assert.equal(enforceReport.disabled, true);
+  assert.deepEqual(enforceReport.written, []);
 });
 
 test('installsFromGit', (t) => {
@@ -287,5 +297,119 @@ gated('configParityWithHost', () => {
     else process.env.GSD_WORKSTREAM = saved.ws;
     if (saved.proj === undefined) delete process.env.GSD_PROJECT;
     else process.env.GSD_PROJECT = saved.proj;
+  }
+});
+
+gated('waveHooksRendered', () => {
+  const bundle = makeBundle();
+  const project = makeProject({ 'standing-orders': { enabled: true } });
+  install(project, bundle);
+
+  const hooks = ours(JSON.parse(renderHooks(project, 'execute:wave:post')).activeHooks);
+  const steps = hooks.filter((h) => h.ref && h.ref.command === 'standing-orders enforce');
+  assert.equal(steps.length, 1, JSON.stringify(hooks));
+  const gates = hooks.filter((h) => h.check && h.check.predicate);
+  assert.equal(gates.length, 1, JSON.stringify(hooks));
+  assert.equal(gates[0].check.predicate.field, 'enforcement');
+  assert.equal(gates[0].check.predicate.equals, 'clear');
+  assert.equal(gates[0].blocking === undefined || gates[0].blocking === true, true);
+});
+
+gated('hostRunsEnforceAndPredicateReadsVerdict', () => {
+  const bundle = makeBundle();
+  const project = makeProject({ 'standing-orders': { enabled: true } });
+  install(project, bundle);
+  const { cwd, home } = project;
+  const predicate = JSON.stringify({ kind: 'artifact-frontmatter-equals', artifact: 'STANDING-ORDERS.md', field: 'enforcement', equals: 'clear' });
+  const check = () => lastJson(run([
+    'check', 'predicate', '--predicate', predicate, '--phase-dir', '.planning/phases/03-billing',
+    '--phase-number', '3', '--phase-req-ids', 'BILL-04', '--raw',
+  ], cwd, home));
+
+  writeOrders(cwd, [ORDER_A, ORDER_UI]);
+  const selected = tryRun(['standing-orders', 'select', '--phase', '3', '--raw'], cwd, home);
+  assert.equal(lastJson(selected.stdout).enforcement, 'pending', selected.stdout + selected.stderr);
+  assert.equal(check().block, true, 'a pending enforcement verdict blocks the wave');
+
+  const enforced = tryRun(['standing-orders', 'enforce', '--phase', '3', '--raw'], cwd, home);
+  const report = lastJson(enforced.stdout);
+  assert.equal(report.subcommand, 'enforce', enforced.stdout + enforced.stderr);
+  assert.equal(report.enforcement, 'clear');
+  assert.deepEqual(report.results, [], 'only backstop orders applied, so the host was not asked to prove anything');
+  assert.equal(check().block, false);
+  assert.ok(fs.existsSync(path.join(cwd, '.planning', 'standing-orders', 'ENFORCEMENT.json')));
+});
+
+// Request-shape contract (OQ3, AC3 end to end): what our enforcementRequest sends is what the real prover accepts.
+gated('enforcementRequestShapeMatchesHost', () => {
+  const { runEnforcement } = require('../lib/host.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'so-enforce-'));
+  try {
+    const write = (rel, text) => {
+      const p = path.join(root, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    };
+    // A negative node test: it reads its subject from GSD_PROHIB_SUBJECT and fails when the subject carries the marker.
+    write('tests/neg.test.cjs', [
+      "'use strict';",
+      "const test = require('node:test');",
+      "const assert = require('node:assert/strict');",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "test('subject carries no violation marker', () => {",
+      '  const subject = process.env.GSD_PROHIB_SUBJECT;',
+      "  const text = subject ? fs.readFileSync(path.resolve(process.cwd(), subject), 'utf8') : '';",
+      "  assert.ok(!text.includes('VIOLATION-MARKER'), 'subject violates the prohibition');",
+      '});',
+      '',
+    ].join('\n'));
+    write('tests/fixtures/bad.txt', 'this subject contains VIOLATION-MARKER\n');
+    write('tests/fixtures/good.txt', 'this subject is clean\n');
+
+    const deps = {
+      execFile: childProcess.execFileSync,
+      readFile: (p) => fs.readFileSync(p, 'utf8'),
+      isFile: (p) => {
+        try {
+          return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      },
+      nodePath: process.execPath,
+    };
+    const base = {
+      id: 'NEG-1',
+      kind: 'prohibition',
+      statement: 'A subject never carries the violation marker.',
+      verification: 'test',
+      check_kind: 'node-test',
+      check_target: 'tests/neg.test.cjs',
+      check_violation_fixture: 'tests/fixtures/bad.txt',
+      check_clean_fixture: 'tests/fixtures/good.txt',
+    };
+    const go = (order) => runEnforcement({ order, cwd: root, env: { GSD_TOOLS: CLI }, argv: ['node', CLI], deps });
+
+    const proper = go(base);
+    assert.equal(proper.status, 'green', JSON.stringify(proper));
+    assert.equal(proper.flagged, false, JSON.stringify(proper));
+    assert.equal(proper.located, true);
+    assert.equal(proper.kind, 'node-test');
+    assert.equal(proper.id, 'NEG-1');
+
+    // the check "passes on its violation fixture": the violation fixture is replaced by the clean one
+    const toothless = go({ ...base, check_violation_fixture: 'tests/fixtures/good.txt' });
+    assert.equal(toothless.flagged, true, JSON.stringify(toothless));
+    assert.notEqual(toothless.status, 'green', JSON.stringify(toothless));
+
+    // no clean-fixture control: fail-first is unprovable, so flagged
+    const { check_clean_fixture: omitted, ...withoutClean } = base;
+    assert.ok(omitted);
+    const uncontrolled = go(withoutClean);
+    assert.equal(uncontrolled.flagged, true, JSON.stringify(uncontrolled));
+    assert.notEqual(uncontrolled.status, 'green');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

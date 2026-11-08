@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
-- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -125,7 +125,7 @@ Because fragments are static, dynamic content moves through files: a **step** co
 | `plan:pre` | `gate` `query: standing-orders conflicts` | Blocks on validation errors, deterministic conflicts, undefined contexts, and (per `block_on`) unlocatable `test`-tier checks. |
 | `plan:post` | `gate` `query: standing-orders coverage` | Every applicable order cited by a plan; no plan modifies a check target. |
 | `execute:wave:post` | `gate` `query: standing-orders enforce` | For each applicable `test`-tier order, calls `gsd-tools check prohibition-enforcement --json` with the order projected as a prohibition. Reuses gsd-core's fail-first prover; no prover is copied into this repo. |
-| `verify:pre` | `contribution` into `verifier` | Static fragment: grade applicable orders from `APPLICABLE.md` as exogenous predicates; a `backstop` order is `insufficient_spec`. |
+| `verify:pre` | `contribution` into `verifier` | Static fragment: grade applicable orders from `APPLICABLE.md` as exogenous predicates; a `backstop` order is `insufficient_spec`. **Superseded by A6:** not declared; orders reach the verifier as projected `must_haves`. |
 | `ship:pre` | `step` → `standing-orders trace <phase-dir>` | Appends one `TRACE.jsonl` record per applicable order. Sole writer of the trace (ADR-5057). |
 
 ### 5. Conflict detection: deterministic first, LLM second
@@ -267,6 +267,30 @@ Phase resolution: a `ref.command` step receives only `--phase <N>`. The router r
 
 Selection scope at `plan:pre`: a phase's files are the paths its planning documents name plus any existing plans' `files_modified`. `coverage` at `plan:post` recomputes from the plans' actual `files_modified` and `requirements`, so an order that becomes applicable only once the plans exist must still be cited. A conflict blocks only when at least one of its orders applies to the phase; an invalid or unreadable `ORDERS.yaml` always blocks unless `block_on` is `never`.
 
+## Amendments (2026-11-08, phase 3)
+
+**A6 — Orders reach the verifier through the plan, not through a `verify:pre` contribution.** Read from gsd-core 1.19.0, 1.20.1 and `next`:
+
+- `verify:pre` belongs to `workflows/verify-work.md`, whose loop-host marker declares `agent-roles: orchestrator` (line 4). Under the role partition gsd-core made normative in #4740, a contribution `into: verifier` there is invalid.
+- `verifier` is admitted at the `execute:*` points (`workflows/execute-phase.md:4`), but the only place `gsd-verifier` is spawned, `execute-phase/steps/verify-phase-goal.md:128-158`, has no contribution block, so such a fragment is never delivered. Reported upstream as [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984).
+- `gsd-verifier` already grades the plan's `must_haves`: a `truths` item `{statement, verification: backstop}` is `insufficient_spec` and becomes a human-verification item (`agents/gsd-verifier.md:210`); a `prohibitions` item with `verification: test` and no enforcement evidence is flagged, never green (`:159-164`).
+
+Decision, confirmed by the maintainer on 2026-11-08:
+
+- The `plan:pre` planner contribution tells the planner to **project** every applicable order into a plan's `must_haves`: a `test` order as a `prohibitions` item `{statement: "<id>: …", status: resolved, verification: test, check_kind, check_target, …}` (gsd-core's own field names), a `backstop` order as a `truths` item `{statement: "<id>: …", verification: backstop}`. `APPLICABLE.md` prints the exact item for each order.
+- `standing-orders coverage` at `plan:post` rejects a phase whose plans cite an order without projecting it (`not_projected`), so the projection is mechanical, not advisory.
+- No `verify:pre` contribution is declared. It returns, as an `execute:post` contribution `into: verifier`, once #5984 gives the verifier a landing site.
+- This supersedes A1's `backstop` → `judgment` mapping: a `backstop` order is never a prohibition item and is never sent to the prover. A `judgment` prohibition would route to judgment review rather than `insufficient_spec`; the `backstop` truth is the host's own tier for "known rule, no mechanical check".
+- Open question 2's condition (b) still holds: projection only adds `must_haves` items; it changes nothing about how the verifier grades the phase's own predicates.
+
+Cost, stated rather than hidden: `gsd-verifier` receives no enforcement evidence for a projected `test` prohibition, so it reports it flagged and the phase verifies `human_needed`. The mechanical proof that a `test` order holds is the `execute:wave:post` enforce gate (below). Delivering that evidence to the verifier also depends on #5984.
+
+**Enforce gate.** As with A5, the gate is a step plus a predicate: `standing-orders enforce` at `execute:wave:post` (which the host dispatches for every `ref.command` step, `execute-phase.md:993`) runs `gsd-tools check prohibition-enforcement --json <request>` once per applicable `test` order, with the project root as working directory (the prover resolves relative paths against the process cwd), each call bounded at 180 s. It writes `enforcement` into `STANDING-ORDERS.md`; a blocking `artifact-frontmatter-equals` gate requires `enforcement == clear`. An order counts as proven only when the host answers `status: green` **and** `flagged: false`; a timeout, a non-zero exit, unreadable output or a missing host CLI is `flagged`. `select` and `coverage` reset the field to `pending`, and `enforce` writes `pending` before it runs any check, so a run that never finishes cannot leave a stale `clear`.
+
+**Check-file edit rule (R11).** `coverage` rejects a plan whose `files_modified` names a check file of an applicable `test` order: the `check_target` of a `node-test` order, and the violation and clean fixtures of either kind. A `lint-rule` order's `check_target` is the code under the rule, which the phase is expected to change, so it is not protected.
+
+**Open question 3, pinned.** The request/response shape is byte-identical in gsd-core 1.19.0, 1.20.1 and `next`. `engines.gsd` is `>=1.19.0 <2.0.0`; the `host-contract` CI job runs a request-shape contract test against 1.19.0 and 1.20.1, and a minor release that changes the shape fails that test.
+
 ## Alternatives considered
 
 | Alternative | Why rejected |
@@ -301,7 +325,7 @@ Each phase is one sub-issue and one PR, stacked on `main`; epic [#1](https://git
 | --- | --- | --- | --- | --- |
 | 1 | #2 | `lib/orders.cjs`, `select.cjs`, `conflicts.cjs`; router with `validate` (direct CLI); `references/standing-orders.md`; vendored js-yaml; this amendment. | R1, R2, R3, R4, R5 (library), R6 (library), AC7 | Unit tests plus `fast-check` properties: context closure idempotent, conflict detection symmetric, selection monotone in scope; byte-cap tests at limit −1, limit, limit +1; `validate` runnable as a direct CLI. |
 | 2 | #3 | Manifest, `select`/`conflicts`/`coverage` subcommands, `plan:pre` select step, planner contribution, `plan:pre` and `plan:post` gates as step + `predicate`. | R5 (wiring), R6 (gate), R7, R9, R17, AC1, AC2, AC5 | Manifest passes gsd-core's validator; installs from a local path and from git; `standing-orders` family reachable through `gsd_run`. |
-| 3 | #4 | `enforce` gate via `check prohibition-enforcement` (with `backstop` → `judgment`, A1); check-target edit rule extending `coverage`; **`verify:pre` verifier contribution**. | R10, R11, R12, AC3, AC4, AC8 | Request-shape contract test against the pinned `engines.gsd`; RED fixture for a plan editing a check target; `backstop` → `insufficient_spec`. |
+| 3 | #4 | `enforce` step + `execute:wave:post` predicate gate via `check prohibition-enforcement`; check-file edit rule and projection rule extending `coverage`; planner projection of orders into `must_haves` (A6, replacing the `verify:pre` verifier contribution). | R10, R11, R12, AC3, AC4, AC8 | Request-shape contract test against gsd-core 1.19.0 and 1.20.1; RED fixture for a plan editing a check target; a `backstop` order projected as a `verification: backstop` truth, which gsd-verifier reports `insufficient_spec`. |
 | 4 | #5 | `trace`, `impact`, `stale`; `select` warns on stale orders. | R13, R14, R15, AC6 | Append-only property test; hash stable under key reorder; `impact` and `stale` reachable through `gsd_run`. |
 | 5 | #6 | Promotion skill; LLM conflict skill (`agentVerdict`, non-blocking). | R8, R16 | Dismissal-needs-reason and `--auto`-never-dismisses tests. |
 | 6 | #7 | Mutation hardening. | — | Separate ADR before any implementation. |
