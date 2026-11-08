@@ -618,19 +618,26 @@ function readEnforcement({ root, io }) {
 }
 
 /** The last code commit (the ledger's own commits excluded), or null plus a `commit_unresolved` warning. */
+/** First non-blank line of a failure's message, so a subprocess error stays one line. */
+function firstErrorLine(e) {
+  const line = String(errMessage(e)).split(/\r?\n/).map((l) => l.trim()).find((l) => l !== '');
+  return line === undefined ? 'unknown error' : line;
+}
+
 function resolveCommitSha({ root, io }) {
   const unresolved = (detail) => ({ sha: null, warning: { code: 'commit_unresolved', message: `the code commit could not be resolved (${detail}); records carry commit_sha null` } });
   let out;
   try {
     out = io.execFile('git', ['log', '-1', '--format=%H', '--', '.', `:(exclude)${TRACE_PATH}`], {
       cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
       timeout: GIT_TIMEOUT_MS,
       encoding: 'utf8',
       windowsHide: true,
       maxBuffer: 1024 * 1024,
     });
   } catch (e) {
-    return unresolved(errMessage(e));
+    return unresolved(firstErrorLine(e));
   }
   const sha = outputText(out).trim();
   return COMMIT_SHA_RE.test(sha) ? { sha, warning: null } : unresolved('git printed no commit id');
@@ -664,13 +671,14 @@ function commitTrace({ phaseDir, root, io }) {
   try {
     out = io.execFile(io.nodePath, [cli, 'commit', message, '--files', TRACE_PATH], {
       cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
       timeout: HOST_TIMEOUT_MS,
       encoding: 'utf8',
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
     });
   } catch (e) {
-    return notCommitted(`host_failed: ${errMessage(e)}`);
+    return notCommitted(`host_failed: ${firstErrorLine(e)}`);
   }
   const answer = parseHostAnswer(out, io);
   if (answer === null) return notCommitted('host_output_invalid: the host commit output is not a JSON object');
@@ -802,6 +810,12 @@ function parseQueryFlags(subcommand, rest) {
   return { options };
 }
 
+function humanPhaseLine(p) {
+  const list = (xs) => (Array.isArray(xs) && xs.length > 0 ? xs.join(', ') : '-');
+  const commit = typeof p.commit_sha === 'string' && p.commit_sha !== '' ? p.commit_sha.slice(0, 7) : 'none';
+  return `  ${p.phase}: ${p.disposition}${p.hash_mismatch === true ? ', order changed since' : ''}; commit ${commit}; plans ${list(p.plans)}; files ${list(p.files)}`;
+}
+
 function humanQueryLines(result) {
   if (result.subcommand === 'stale') {
     const lines = [`standing-orders stale: ${result.stale.length} stale order(s)`];
@@ -810,7 +824,7 @@ function humanQueryLines(result) {
     return lines;
   }
   const lines = [`standing-orders impact: ${result.id} ${EM_DASH} ${result.status}; ${result.phases.length} phase(s) traced`];
-  for (const p of result.phases) lines.push(`  ${p.phase}: ${p.disposition}${p.hash_mismatch === true ? ', order changed since' : ''}`);
+  for (const p of result.phases) lines.push(humanPhaseLine(p));
   for (const w of result.warnings) lines.push(`  ${w.code}: ${w.message}`);
   return lines;
 }

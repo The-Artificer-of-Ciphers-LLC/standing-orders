@@ -325,6 +325,29 @@ describe('router trace', () => {
     assert.ok(!call.opts.shell, 'no shell');
   });
 
+  it('subprocessStderrIsCaptured', () => {
+    const m = setupTrace();
+    run(m, 'trace');
+    assert.deepEqual(m.gitCalls[0].opts.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.equal(m.hostCalls.length, 1);
+    assert.deepEqual(m.hostCalls[0].opts.stdio, ['ignore', 'pipe', 'pipe']);
+  });
+
+  it('subprocessFailureIsOneLine', () => {
+    const boom = new Error('Command failed: git log\nfatal: not a git repository');
+    const g = setupTrace({ git: boom });
+    const gw = warningOf(run(g, 'trace'), 'commit_unresolved');
+    assert.ok(gw, 'commit_unresolved raised');
+    assert.ok(!gw.message.includes('\n'), JSON.stringify(gw.message));
+    assert.ok(gw.message.includes('Command failed: git log'), gw.message);
+
+    const h = setupTrace({ host: new Error('Command failed: git log\nfatal: not a git repository') });
+    const hw = warningOf(run(h, 'trace'), 'trace_not_committed');
+    assert.ok(hw, 'trace_not_committed raised');
+    assert.ok(!hw.message.includes('\n'), JSON.stringify(hw.message));
+    assert.ok(hw.message.includes('Command failed: git log'), hw.message);
+  });
+
   it('gitUnavailableDegrades', () => {
     const outputs = [new Error('spawn git ENOENT'), Object.assign(new Error('slow'), { code: 'ETIMEDOUT' }), '', '\n', 'fatal: not a git repository\n', 'abc123\n', 'A'.repeat(40) + '\n', 'a'.repeat(41) + '\n'];
     for (const git of outputs) {
@@ -531,6 +554,35 @@ describe('router impact and stale', () => {
     assert.equal(stale.ok, true);
     assert.deepEqual(stale.stale.map((s) => [s.id, s.reason, s.last_phase]), [['BILL-RULE', 'changed', PHASE_4]]);
     assert.equal(exitCodeFor(stale), 1);
+  });
+
+  it('impactHumanLinesShowCommitPlansFiles', () => {
+    const m = tracedProject();
+    const listOf = (xs) => (xs.length === 0 ? '-' : xs.join(', '));
+    const lineFor = (r, p, tail) => `  ${p.phase}: ${p.disposition}${tail}; commit ${p.commit_sha === null ? 'none' : p.commit_sha.slice(0, 7)}; plans ${listOf(p.plans)}; files ${listOf(p.files)}`;
+    const linesOf = (log, r, tail) => r.phases.map((p) => lineFor(r, p, tail)).filter((l) => log.includes(l));
+
+    const r = run(m, 'impact', ['BILL-RULE']);
+    const before = m.calls.log.length;
+    run(m, 'impact', ['BILL-RULE'], { raw: false });
+    const log = m.calls.log.slice(before);
+    assert.equal(r.phases[0].commit_sha, SHA_1);
+    assert.ok(log.includes(`  ${PHASE}: insufficient_spec; commit a1a1a1a; plans ${listOf(r.phases[0].plans)}; files src/billing/refund.js`), log.join('|'));
+    assert.equal(linesOf(log, r, '').length, r.phases.length, log.join('|'));
+
+    m.deps.writeFile(abs(m, ORDERS), doc({ orders: [order({ id: 'BILL-RULE', statement: 'Bill rule, edited.', scope: SCOPE_BILLING }), UI_RULE] }));
+    const r2 = run(m, 'impact', ['BILL-RULE']);
+    const before2 = m.calls.log.length;
+    run(m, 'impact', ['BILL-RULE'], { raw: false });
+    const log2 = m.calls.log.slice(before2);
+    assert.equal(linesOf(log2, r2, ', order changed since').length, r2.phases.length, log2.join('|'));
+
+    const none = setupTrace({ git: new Error('no git') });
+    run(none, 'trace');
+    const rn = run(none, 'impact', ['BILL-RULE']);
+    const b3 = none.calls.log.length;
+    run(none, 'impact', ['BILL-RULE'], { raw: false });
+    assert.ok(none.calls.log.slice(b3).some((l) => l.startsWith(`  ${PHASE}: ${rn.phases[0].disposition}; commit none; plans `)), none.calls.log.join('|'));
   });
 
   it('impactStates', () => {
