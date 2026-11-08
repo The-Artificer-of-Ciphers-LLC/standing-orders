@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "id": "standing-orders",
   "role": "feature",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "title": "Standing Orders",
   "description": "Project-wide, context-scoped business rules: conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
   "tier": "full",
   "requires": [],
-  "engines": { "gsd": ">=1.19.0" },
+  "engines": { "gsd": ">=1.19.0 <2.0.0" },
   "runtimeCompat": { "supported": ["*"], "unsupported": [] },
   "author": { "name": "The Artificer of Ciphers LLC", "url": "https://github.com/The-Artificer-of-Ciphers-LLC" },
   "homepage": "https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders",
@@ -27,7 +27,7 @@
       "family": "standing-orders",
       "module": "standing-orders-router.cjs",
       "router": "routeStandingOrdersCommand",
-      "subcommands": ["select", "conflicts", "coverage", "validate"]
+      "subcommands": ["select", "conflicts", "coverage", "enforce", "validate"]
     }
   ],
   "steps": [
@@ -43,6 +43,14 @@
       "point": "plan:post",
       "ref": { "command": "standing-orders coverage" },
       "produces": ["STANDING-ORDERS.md"],
+      "consumes": [],
+      "when": "standing-orders.enabled",
+      "onError": "halt"
+    },
+    {
+      "point": "execute:wave:post",
+      "ref": { "command": "standing-orders enforce" },
+      "produces": [".planning/standing-orders/ENFORCEMENT.json", "STANDING-ORDERS.md"],
       "consumes": [],
       "when": "standing-orders.enabled",
       "onError": "halt"
@@ -77,6 +85,13 @@
     {
       "point": "plan:post",
       "check": { "predicate": { "kind": "artifact-frontmatter-equals", "artifact": "STANDING-ORDERS.md", "field": "coverage", "equals": "complete" } },
+      "when": "standing-orders.enabled",
+      "blocking": true,
+      "onError": "halt"
+    },
+    {
+      "point": "execute:wave:post",
+      "check": { "predicate": { "kind": "artifact-frontmatter-equals", "artifact": "STANDING-ORDERS.md", "field": "enforcement", "equals": "clear" } },
       "when": "standing-orders.enabled",
       "blocking": true,
       "onError": "halt"

@@ -13,10 +13,11 @@
  *   args[2..] === positionals / flags
  * A router that returns a Promise is rejected by the host.
  *
- * Subcommands: `validate` (phase 1) and the loop wiring `select`, `conflicts`
- * and `coverage` (phase 2). The same verbs are reachable directly:
+ * Subcommands: `validate` (phase 1), the loop wiring `select`, `conflicts` and
+ * `coverage` (phase 2) and the execution gate `enforce` (phase 3). The same verbs
+ * are reachable directly:
  *   node standing-orders-router.cjs validate [file] [--raw]
- *   node standing-orders-router.cjs select|conflicts|coverage (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
+ *   node standing-orders-router.cjs select|conflicts|coverage|enforce (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
  * Exit codes (direct CLI only): 0 ok; 1 invalid, blocked, incomplete or usage
  * error; 2 a file or directory could not be read or resolved.
  *
@@ -31,16 +32,17 @@ const { parseOrders, ERROR_CODES, KINDS, VERIFICATIONS } = require('./lib/orders
 const { detectConflicts } = require('./lib/conflicts.cjs');
 const { readCapabilityConfig } = require('./lib/config.cjs');
 const { collectPhaseInputs, splitReqIds } = require('./lib/phase.cjs');
-const { resolvePhase } = require('./lib/host.cjs');
-const { evaluateBlock, evaluateCoverage, renderVerdict, STATUS } = require('./lib/gate.cjs');
+const { resolvePhase, runEnforcement } = require('./lib/host.cjs');
+const { evaluateBlock, evaluateCoverage, evaluateEnforcement, renderVerdict, STATUS } = require('./lib/gate.cjs');
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
 const { errMessage, unique } = require('./lib/util.cjs');
 
 const FAMILY = 'standing-orders';
-const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'validate']);
-const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage']);
+const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'validate']);
+const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce']);
 const APPLICABLE_PATH = '.planning/standing-orders/APPLICABLE.md';
 const CONFLICTS_PATH = '.planning/standing-orders/CONFLICTS.json';
+const ENFORCEMENT_PATH = '.planning/standing-orders/ENFORCEMENT.json';
 const VERDICT_NAME = 'STANDING-ORDERS.md';
 const DISABLED_MESSAGE = 'standing-orders is not enabled; set standing-orders.enabled to true';
 const DEFAULT_ORDERS_PATH = path.join('.planning', 'standing-orders', 'ORDERS.yaml');
@@ -48,7 +50,7 @@ const DEFAULT_ORDERS_PATH = path.join('.planning', 'standing-orders', 'ORDERS.ya
 const MAX_FILE_BYTES = 256 * 1024;
 const REPORT_SCHEMA = 1;
 
-/** Every error code the loop subcommands (select, conflicts, coverage) emit themselves. */
+/** Every error code the loop subcommands (select, conflicts, coverage, enforce) emit themselves. */
 const LOOP_CODES = Object.freeze({
   USAGE: 'usage',
   PATH_OUTSIDE_CWD: 'path_outside_cwd',
@@ -215,7 +217,7 @@ function validateFile({ cwd, fileArg, deps }) {
   return detectInto(loaded.report, loaded.document, loaded.root, deps);
 }
 
-// ─── Loop subcommands: select, conflicts, coverage ────────────────────────────
+// ─── Loop subcommands: select, conflicts, coverage, enforce ────────────────────────────
 
 // `--ws` is part of the host contract (the dispatcher forwards it): accepted and ignored.
 const VALUE_FLAGS = new Set(['--phase', '--phase-dir', '--req-ids', '--files', '--ws']);
@@ -303,6 +305,7 @@ function ordersForGate(cwd, io) {
 function humanLoopLines(result) {
   const parts = [`conflicts ${result.conflicts}`];
   if (result.coverage !== null) parts.push(`coverage ${result.coverage}`);
+  if (result.enforcement !== null) parts.push(`enforcement ${result.enforcement}`);
   const lines = [`standing-orders ${result.subcommand}: phase ${result.phase.dir} — ${parts.join(', ')}: ${result.applicable.length} applicable`];
   for (const r of result.reasons) lines.push(`  ${r.code}: ${r.message}`);
   return lines;
@@ -321,7 +324,7 @@ function resolvePhaseDir({ options, root, io }) {
   return { ok: true, phaseDir: resolved.phaseDir, reqIds: resolved.reqIds };
 }
 
-/** Everything the three loop subcommands derive from the phase and ORDERS.yaml, before any write. */
+/** Everything the loop subcommands derive from the phase and ORDERS.yaml, before any write. */
 function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io }) {
   const phaseRel = toSlashes(path.relative(root, phaseDir));
   const loadedOrders = ordersForGate(root, io);
@@ -337,17 +340,16 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
 
   let coverageStatus = subcommand === 'select' ? STATUS.PENDING : null;
   let reasons = block.reasons;
-  let uncited = [];
   let cov = null;
-  if (subcommand === 'coverage') {
+  if (subcommand === 'coverage' || subcommand === 'enforce') {
     cov = evaluateCoverage({
       applicableIds,
+      applicable,
       ordersTotal: loadedOrders.document ? loadedOrders.document.orders.length : 0,
       plans: inputs.plans,
     });
     coverageStatus = cov.status;
     reasons = [...block.reasons, ...cov.reasons];
-    uncited = cov.uncited;
   }
   return {
     phaseDir,
@@ -361,19 +363,22 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
     verdictRel: `${phaseRel}/${VERDICT_NAME}`,
     coverageStatus,
     reasons,
-    uncited,
+    uncited: cov ? cov.uncited : [],
+    notProjected: cov ? cov.notProjected : [],
+    checkFileEdits: cov ? cov.checkFileEdits : [],
     cov,
   };
 }
 
-function verdictText(ev, coverage, generatedBy) {
+function verdictText(ev, coverage, generatedBy, enforcement = STATUS.PENDING, reasons = ev.reasons) {
   return renderVerdict({
     phase: path.basename(ev.phaseDir),
     conflicts: ev.block.status,
     coverage,
+    enforcement,
     generatedBy,
     applicableIds: ev.applicableIds,
-    reasons: ev.reasons,
+    reasons,
   });
 }
 
@@ -431,8 +436,45 @@ function writeCoverageOutputs({ ev, put }) {
   put(ev.verdictRel, verdictText(ev, ev.cov.status, 'coverage'));
 }
 
-function buildLoopResult({ subcommand, ev, omitted, written }) {
-  return {
+/**
+ * Run the host prover for every applicable `test` order. An unusable ORDERS.yaml
+ * runs nothing and reports `error`; no applicable test order reports `clear`.
+ */
+function evaluateEnforce({ ev, root, io }) {
+  const state = ev.loadedOrders.orders.state;
+  if (state === 'invalid' || state === 'unreadable') return { status: STATUS.ERROR, results: [], reasons: [] };
+  const results = ev.applicable
+    .filter((o) => o.verification === 'test')
+    .map((order) => runEnforcement({ order, cwd: root, env: io.env, argv: io.argv, deps: io }));
+  const verdict = evaluateEnforcement({ results });
+  return { status: verdict.status, results, reasons: verdict.reasons };
+}
+
+/**
+ * `enforce` writes the verdict FIRST (enforcement pending) so a crash can never
+ * leave a stale `clear`, then runs the checks, then ENFORCEMENT.json, then the
+ * final verdict. Returns the enforcement outcome; throws if a final write fails.
+ */
+function runEnforce({ ev, root, io, put, rewriteVerdict }) {
+  put(ev.verdictRel, verdictText(ev, ev.coverageStatus, 'enforce', STATUS.PENDING));
+  const enforced = evaluateEnforce({ ev, root, io });
+  try {
+    put(ENFORCEMENT_PATH, JSON.stringify({ schema: REPORT_SCHEMA, phase: ev.phaseRel, status: enforced.status, results: enforced.results }, null, 2) + '\n');
+    put(ev.verdictRel, verdictText(ev, ev.coverageStatus, 'enforce', enforced.status, [...ev.reasons, ...enforced.reasons]));
+  } catch (e) {
+    rewriteVerdict(STATUS.ERROR);
+    throw e;
+  }
+  return enforced;
+}
+
+function loopEnforcement(subcommand, enforced) {
+  if (subcommand === 'enforce') return enforced.status;
+  return subcommand === 'conflicts' ? null : STATUS.PENDING;
+}
+
+function buildLoopResult({ subcommand, ev, omitted, written, enforced }) {
+  const result = {
     schema: REPORT_SCHEMA,
     subcommand,
     ok: true,
@@ -440,15 +482,30 @@ function buildLoopResult({ subcommand, ev, omitted, written }) {
     phase: { dir: ev.phaseRel, reqIds: ev.reqIds },
     conflicts: ev.block.status,
     coverage: ev.coverageStatus,
-    reasons: ev.reasons,
+    enforcement: loopEnforcement(subcommand, enforced),
+    reasons: subcommand === 'enforce' ? [...ev.reasons, ...enforced.reasons] : ev.reasons,
     applicable: ev.applicableIds,
     omitted,
     uncited: ev.uncited,
+    notProjected: ev.notProjected,
+    checkFileEdits: ev.checkFileEdits,
     unrelatedConflicts: ev.block.unrelatedConflicts,
     errors: ev.loadedOrders.orders.errors,
     warnings: ev.warnings,
     written,
   };
+  if (subcommand === 'enforce') result.results = enforced.results;
+  return result;
+}
+
+/** Rewrite the verdict after a failed write; the original failure is what gets reported, so this never throws. */
+function bestEffortVerdict({ ev, io, root, coverage = ev.coverageStatus, enforcement = STATUS.PENDING, seq }) {
+  const generatedBy = enforcement === STATUS.ERROR ? 'enforce' : 'coverage';
+  try {
+    writeAtomic(io, path.resolve(root, ev.verdictRel), verdictText(ev, coverage, generatedBy, enforcement), seq);
+  } catch (e) {
+    // the verdict could not be written at all; the failure reported by the caller still names it
+  }
 }
 
 function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
@@ -473,7 +530,7 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
 
   const ev = evaluateLoop({ subcommand, options, root, phaseDir: phase.phaseDir, reqIds, config, io });
 
-  if (subcommand === 'select') {
+  if (subcommand === 'select' || subcommand === 'enforce') {
     const unusable = prepareOutputDir({ subcommand, root, io });
     if (unusable !== null) return loopFailure(subcommand, unusable.code, unusable.message, [], error);
   }
@@ -485,21 +542,20 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
     written.push(rel);
   };
   let omitted = [];
+  let enforced = null;
   try {
     if (subcommand === 'select') omitted = writeSelectOutputs({ ev, config, put });
     else if (subcommand === 'coverage') writeCoverageOutputs({ ev, put });
-  } catch (e) {
-    if (subcommand === 'coverage') {
-      try {
-        writeAtomic(io, path.resolve(root, ev.verdictRel), verdictText(ev, STATUS.ERROR, 'coverage'), seq++);
-      } catch (e2) {
-        // the verdict could not be written at all; the failure below still reports it
-      }
+    else if (subcommand === 'enforce') {
+      const rewriteVerdict = (enforcement) => bestEffortVerdict({ ev, io, root, enforcement, seq: seq++ });
+      enforced = runEnforce({ ev, root, io, put, rewriteVerdict });
     }
+  } catch (e) {
+    if (subcommand === 'coverage') bestEffortVerdict({ ev, io, root, coverage: STATUS.ERROR, seq: seq++ });
     return loopFailure(subcommand, LOOP_CODES.WRITE_FAILED, `${subcommand}: could not write output: ${errMessage(e)}`, written, error);
   }
 
-  const result = buildLoopResult({ subcommand, ev, omitted, written });
+  const result = buildLoopResult({ subcommand, ev, omitted, written, enforced });
   if (rawOut) io.log(JSON.stringify(result));
   else for (const l of humanLoopLines(result)) io.log(l);
   return result;
@@ -567,6 +623,7 @@ function exitCodeFor(report) {
     if (report.ok === false) return Array.isArray(report.errors) && report.errors.some((e) => e.code === LOOP_CODES.USAGE) ? 1 : 2;
     if (report.disabled === true) return 0;
     if (report.conflicts === STATUS.BLOCKED || report.coverage === STATUS.INCOMPLETE || report.coverage === STATUS.ERROR) return 1;
+    if (report.enforcement === STATUS.FLAGGED || report.enforcement === STATUS.ERROR) return 1;
     return 0;
   }
   if (report.ok) return 0;
@@ -584,4 +641,4 @@ if (require.main === module) {
   process.exitCode = exitCodeFor(report);
 }
 
-module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA, LOOP_CODES };
+module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, ENFORCEMENT_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA, LOOP_CODES };

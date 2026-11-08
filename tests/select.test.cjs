@@ -228,7 +228,8 @@ describe('renderApplicable', () => {
     const multi = parsed({ orders: [order({ id: 'X', statement: '€€€€' })] }).orders;
     const a = renderApplicable(ascii, { maxBytes: 100000 }).bytes;
     const m = renderApplicable(multi, { maxBytes: 100000 }).bytes;
-    assert.equal(m - a, 4 * 2, 'each € is 3 bytes vs 1 for a');
+    // The statement renders twice: on its `- Statement:` line and inside the `- Project as:` item.
+    assert.equal(m - a, 2 * 4 * 2, 'each € is 3 bytes vs 1 for a, in both places the statement appears');
     const r = renderApplicable(multi, { maxBytes: m - 1 });
     assert.deepEqual(r.omitted, ['X']);
   });
