@@ -104,6 +104,16 @@ describe('router promote: --add', () => {
     }
   });
 
+  it('routerPromoteAddDisabledBeforeParse', () => {
+    const m = setup({ config: JSON.stringify({ 'standing-orders': { enabled: false } }) });
+    const r = run(m, ['promote', '--add', '[{}]', '--raw']);
+    assert.equal(r.ok, true);
+    assert.equal(r.disabled, true);
+    assert.deepEqual(r.written, []);
+    noWrites(m);
+    assert.equal(m.read(ORDERS), PLAIN_ORDERS, 'ORDERS.yaml untouched');
+  });
+
   it('routerPromoteFlagShapes', () => {
     const cases = [
       [['promote', '--add', NEW_ORDER_JSON, '--add', NEW_ORDER_JSON, '--raw'], 'batch_refused'],
@@ -123,6 +133,7 @@ describe('router promote: --add', () => {
       [['promote', '--candidates', ...PHASE_FLAG, '--bogus', '--raw'], 'usage'],
       [['promote', '--candidates', ...PHASE_FLAG, 'positional', '--raw'], 'usage'],
       [['promote', '--candidates', ...PHASE_FLAG, '--findings', FOUND, '--raw'], 'usage'],
+      [['promote', '--candidates', ...PHASE_FLAG, '--req-ids', 'X', '--raw'], 'usage'],
     ];
     for (const [args, code] of cases) {
       const m = setup();

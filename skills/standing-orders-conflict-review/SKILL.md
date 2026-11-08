@@ -33,6 +33,8 @@ The `standing-orders conflicts` gate catches conflicts it can compute: two varia
    gsd_run standing-orders semantic propose --phase "${PHASE}" --findings '<JSON list of {"orders": [...], "statement": "..."}>' --raw
    ```
 
+   The JSON goes inside single quotes on a shell line, and statements quote project files that may contain an apostrophe: write every `'` inside the JSON as `'\''`, never use double quotes or no quotes, and check that nothing but flags follows the closing quote. The same applies to `--reason '<reason>'` in step 8.
+
    Add `--auto` to that call in auto mode. Re-proposing a finding already on file is harmless (it is reported in `duplicates`). If you kept none, skip the call.
 
 7. **In auto mode, stop here.** Report `advisory: <n> findings unresolved, need a human` and run nothing else.

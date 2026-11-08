@@ -1097,10 +1097,10 @@ function runPromoteCandidates({ values, root, rawOut, io, error }) {
 /** `promote --add`: gated on `enabled`; adds exactly one order by text insertion and writes atomically. */
 function runPromoteAdd({ json, root, rawOut, io, error }) {
   const fail = (code, message, extra) => authoringFailure({ subcommand: 'promote', code, message, rawOut, io, error, extra });
-  const parsed = parseAddArgument(json);
-  if (!parsed.ok) return fail(parsed.code, parsed.message);
   const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
   if (!config.enabled) return disabledResult({ subcommand: 'promote', rawOut, io });
+  const parsed = parseAddArgument(json);
+  if (!parsed.ok) return fail(parsed.code, parsed.message);
 
   const current = readOrdersForWrite({ root, io });
   if (current.failure !== undefined) return fail(current.failure.code, current.failure.message);
@@ -1125,17 +1125,17 @@ function runPromoteAdd({ json, root, rawOut, io, error }) {
 
 function runPromoteCommand({ rest, cwd, raw, error, io }) {
   const usageText =
-    'Usage: standing-orders promote --candidates (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--raw] | standing-orders promote --add <order-json> [--raw]';
+    'Usage: standing-orders promote --candidates (--phase <n> | --phase-dir <dir>) [--raw] | standing-orders promote --add <order-json> [--raw]';
   const rawOut = raw === true || rest.includes('--raw');
   const usage = (message) => authoringFailure({ subcommand: 'promote', code: LOOP_CODES.USAGE, message, rawOut, io, error });
-  const parsed = parseAuthoringFlags('promote', rest, { valued: ['--add', '--phase', '--phase-dir', '--req-ids', '--ws'], bare: ['--candidates'], usageText });
+  const parsed = parseAuthoringFlags('promote', rest, { valued: ['--add', '--phase', '--phase-dir', '--ws'], bare: ['--candidates'], usageText });
   if (parsed.usage !== undefined) return usage(parsed.usage);
   const { values, flags, adds } = parsed;
   const candidates = flags.has('--candidates');
   if (candidates === (adds > 0)) return usage(`${FAMILY} promote: give exactly one of --candidates and --add. ${usageText}`);
   const root = path.resolve(cwd);
   if (adds > 0) {
-    if (values['--phase'] !== undefined || values['--phase-dir'] !== undefined || values['--req-ids'] !== undefined) {
+    if (values['--phase'] !== undefined || values['--phase-dir'] !== undefined) {
       return usage(`${FAMILY} promote: --add takes no phase flags. ${usageText}`);
     }
     if (adds > 1) {
