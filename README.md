@@ -38,7 +38,7 @@ npm test             # node --test + fast-check, ~130 tests
 npm run vendor:check # vendored js-yaml is byte-identical to the pinned devDependency
 ```
 
-Requires Node 20 or newer. Tests are authored with `node:test`; property tests use a fixed seed so a failure reproduces.
+Requires Node 22 or newer (Node 20 reached end of life on 2026-04-30). Tests are authored with `node:test`; property tests use a fixed seed so a failure reproduces.
 
 ## License
 

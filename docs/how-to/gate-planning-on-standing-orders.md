@@ -2,7 +2,7 @@
 
 Install Standing Orders into a GSD project, turn it on, and get every phase's plans checked against the rules in `ORDERS.yaml`: the planner sees only the rules that apply to the phase, conflicting rules stop planning, and a phase whose plans do not cite every applicable rule cannot reach execution.
 
-**Before you start:** GSD (gsd-core) 1.19.0 or newer, Node 20 or newer, and a project with a `.planning/` directory. To write the rules themselves, see [How to validate ORDERS.yaml](validate-standing-orders.md) and the [schema reference](../../references/standing-orders.md#orders).
+**Before you start:** GSD (gsd-core) 1.19.0 or newer, Node 22 or newer, and a project with a `.planning/` directory. To write the rules themselves, see [How to validate ORDERS.yaml](validate-standing-orders.md) and the [schema reference](../../references/standing-orders.md#orders).
 
 ## 1. Install the capability
 

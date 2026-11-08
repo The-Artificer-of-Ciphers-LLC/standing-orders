@@ -19,7 +19,7 @@
     "lint": "node scripts/check-vendored.cjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "fast-check": "^4.10.2",
