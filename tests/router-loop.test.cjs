@@ -504,7 +504,7 @@ const T_B = testOrder({ id: 'T-B', statement: 'Never B.', scope: SCOPE_BILLING, 
 const ENFORCE_ORDERS = doc({ orders: [T_B, T_A] });
 const PLAN = `${PHASE}/03-01-PLAN.md`;
 
-const testProjection = (id, target) => ({ statement: `${id}: rule`, status: 'resolved', verification: 'test', check_kind: 'node-test', check_target: target });
+const testProjection = (id, target) => ({ statement: `${id}: rule`, status: 'resolved', verification: 'test', check_kind: 'node-test', check_target: target, check_violation_fixture: 'tests/fixtures/bad.js', check_clean_fixture: 'tests/fixtures/good.js' });
 const bsProjection = (id) => ({ statement: `${id}: rule`, verification: 'backstop' });
 const PLAN_AB = planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs'), testProjection('T-B', 'tests/b.test.cjs')] });
 

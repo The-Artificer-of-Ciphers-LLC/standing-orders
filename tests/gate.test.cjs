@@ -345,7 +345,7 @@ describe('gate evaluateCoverage check-file edit rule', () => {
   });
 
   it('coverageExactFileMatchOnly', () => {
-    for (const files of [['tests/x.test.cjs.bak'], ['tests/x.test.cjs/'], ['tests/x.test.cjs/inner.js'], ['xtests/x.test.cjs'], ['tests/x.test.cj']]) {
+    for (const files of [['tests/x.test.cjs.bak'], ['tests/x.test.cjs/inner.js'], ['xtests/x.test.cjs'], ['tests/x.test.cj']]) {
       const r = cover([mplan('03-01-PLAN.md', NOT_EDITING, files)]);
       assert.equal(r.status, 'complete', files.join());
       assert.deepEqual(r.checkFileEdits, [], files.join());
@@ -446,6 +446,21 @@ describe('gate evaluateCoverage projection rule', () => {
     // junk entries in `applicable` are ignored
     const junk = evaluateCoverage({ applicableIds: ['T-1'], applicable: [null, 'x', 3, T1], ordersTotal: 1, plans: [mplan('03-01-PLAN.md', { prohibitions: [T1_ITEM] })] });
     assert.equal(junk.status, 'complete');
+  });
+});
+
+describe('gate evaluateCoverage canonical check-file spellings', () => {
+  const T = testOrder({ id: 'T-9', statement: 'S.', check_target: 'tests/a.test.cjs', check_violation_fixture: null, check_clean_fixture: null });
+  const item = { statement: 'T-9: S.', status: 'resolved', verification: 'test', check_kind: 'node-test', check_target: 'tests/a.test.cjs' };
+  const cover = (files) => evaluateCoverage({ applicableIds: ['T-9'], applicable: [T], ordersTotal: 1, plans: [mplan('03-01-PLAN.md', { prohibitions: [item] }, files)] });
+
+  it('coverageCatchesCheckFileSpellings', () => {
+    for (const s of ['tests/./a.test.cjs', 'tests/x/../a.test.cjs', 'Tests/a.test.cjs', 'tests/a.test.cjs/', ' tests/a.test.cjs']) {
+      const r = cover([s]);
+      assert.deepEqual(codesOf(r), ['check_file_modified'], s);
+      assert.equal(r.checkFileEdits[0].file, 'tests/a.test.cjs', s);
+    }
+    assert.deepEqual(codesOf(cover(['tests/a.test.cjs.bak'])), []);
   });
 });
 

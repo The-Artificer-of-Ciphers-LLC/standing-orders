@@ -217,7 +217,7 @@ function validateFile({ cwd, fileArg, deps }) {
   return detectInto(loaded.report, loaded.document, loaded.root, deps);
 }
 
-// ─── Loop subcommands: select, conflicts, coverage, enforce ────────────────────────────
+// ─── Loop subcommands: select, conflicts, coverage, enforce ───────────────────
 
 // `--ws` is part of the host contract (the dispatcher forwards it): accepted and ignored.
 const VALUE_FLAGS = new Set(['--phase', '--phase-dir', '--req-ids', '--files', '--ws']);
@@ -499,8 +499,7 @@ function buildLoopResult({ subcommand, ev, omitted, written, enforced }) {
 }
 
 /** Rewrite the verdict after a failed write; the original failure is what gets reported, so this never throws. */
-function bestEffortVerdict({ ev, io, root, coverage = ev.coverageStatus, enforcement = STATUS.PENDING, seq }) {
-  const generatedBy = enforcement === STATUS.ERROR ? 'enforce' : 'coverage';
+function bestEffortVerdict({ ev, io, root, generatedBy, coverage = ev.coverageStatus, enforcement = STATUS.PENDING, seq }) {
   try {
     writeAtomic(io, path.resolve(root, ev.verdictRel), verdictText(ev, coverage, generatedBy, enforcement), seq);
   } catch (e) {
@@ -547,11 +546,11 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
     if (subcommand === 'select') omitted = writeSelectOutputs({ ev, config, put });
     else if (subcommand === 'coverage') writeCoverageOutputs({ ev, put });
     else if (subcommand === 'enforce') {
-      const rewriteVerdict = (enforcement) => bestEffortVerdict({ ev, io, root, enforcement, seq: seq++ });
+      const rewriteVerdict = (enforcement) => bestEffortVerdict({ ev, io, root, generatedBy: 'enforce', enforcement, seq: seq++ });
       enforced = runEnforce({ ev, root, io, put, rewriteVerdict });
     }
   } catch (e) {
-    if (subcommand === 'coverage') bestEffortVerdict({ ev, io, root, coverage: STATUS.ERROR, seq: seq++ });
+    if (subcommand === 'coverage') bestEffortVerdict({ ev, io, root, generatedBy: 'coverage', coverage: STATUS.ERROR, seq: seq++ });
     return loopFailure(subcommand, LOOP_CODES.WRITE_FAILED, `${subcommand}: could not write output: ${errMessage(e)}`, written, error);
   }
 
