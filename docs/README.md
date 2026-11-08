@@ -7,10 +7,11 @@ Organized by what you need (Diátaxis).
 - [How to gate GSD planning on your standing orders](how-to/gate-planning-on-standing-orders.md)
 - [How to validate ORDERS.yaml](how-to/validate-standing-orders.md)
 - [How to resolve a wave blocked by Standing Orders](how-to/resolve-standing-orders-enforcement.md)
+- [How to find what a rule change affects](how-to/find-what-a-rule-change-affects.md)
 
 ## Reference
 
-- [`references/standing-orders.md`](../references/standing-orders.md) — schema, matching rules, conflict kinds, configuration, loop wiring, blocking rules, the verdict file, enforcement, every command and its codes
+- [`references/standing-orders.md`](../references/standing-orders.md) — schema, matching rules, conflict kinds, configuration, loop wiring, blocking rules, the verdict file, enforcement, the trace ledger, every command and its codes
 
 ## Explanation
 

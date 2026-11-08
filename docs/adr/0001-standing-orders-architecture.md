@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
-- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Amended again 2026-11-08 (phase 4, [#5](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/5)) — A7, the trace step commits its own ledger. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -291,6 +291,21 @@ Cost, stated rather than hidden: `gsd-verifier` receives no enforcement evidence
 
 **Open question 3, pinned.** The request/response shape is byte-identical in gsd-core 1.19.0, 1.20.1 and `next`. `engines.gsd` is `>=1.19.0 <2.0.0`; the `host-contract` CI job runs a request-shape contract test against 1.19.0 and 1.20.1, and a minor release that changes the shape fails that test.
 
+## Amendments (2026-11-08, phase 4)
+
+**A7 — The trace step commits its own ledger; the record gains `files`; the hash covers the normalized order.** Read from gsd-core 1.19–1.20 `workflows/ship.md`: preflight step 2 requires a clean working tree, step 6 dispatches `ship:pre` gates and then every `ship:pre` step (`gsd_run <ref.command> --phase <n> --raw`, per `references/loop-hook-dispatch.md`), and the push follows. Ship's own later commit names only `.planning/STATE.md`. A `TRACE.jsonl` written by the step and left on disk would therefore never reach the pull request, and would fail the next phase's clean-tree check.
+
+Decision, confirmed by the maintainer on 2026-11-08:
+
+- `standing-orders trace` appends its records and then commits **only** `.planning/standing-orders/TRACE.jsonl` through the host's own commit tool (`gsd-tools commit "<message>" --files <path>`), which applies the project's `commit_docs` policy. When the host skips the commit (`commit_docs` false, or `.planning/` ignored), the file stays written but uncommitted and the step warns; a step never blocks ship. The step declares `onError: skip`, which is how the host treats every `ship:pre` step anyway.
+- `commit_sha` is the last commit that touches anything other than `TRACE.jsonl` (`git log -1 --format=%H -- . ':(exclude).planning/standing-orders/TRACE.jsonl'`, bounded at 10 s). A ship re-run after the trace commit resolves to the same code commit.
+- A re-run appends nothing it has already recorded: a candidate whose `(order_id, order_hash, phase, commit_sha)` already appears is skipped. The file is only ever appended to; an unreadable line is skipped when reading and never rewritten.
+- Each record also carries `files`, the phase's files that matched the order's `scope.paths`, because R14 asks `impact` to list files. `plans` lists the plans whose `must_haves` cite the order. `disposition` is `proven` (the host answered `green` and unflagged in this phase's `ENFORCEMENT.json`), `flagged`, `unenforced` (no enforcement result for this phase) or `insufficient_spec` (`backstop`).
+- `order_hash` is `sha256:` over canonical JSON of the **normalized** order: keys sorted, the set-valued lists (`contexts`, `scope.paths`, `scope.requirements`) sorted and de-duplicated, null fields and empty lists omitted. It is stable under key reordering, list reordering and reformatting, and a later optional field with no value does not re-hash existing orders. A redefinition of a context the order names does not change its hash; `stale` and `impact` report it as `contexts_changed` by comparing the record's effective leaf contexts.
+- `impact` and `stale` only read, so they answer whether or not `standing-orders.enabled` is set, like `validate`. `stale` exits 1 when any order is stale.
+
+Known limit, stated: append-only is a convention enforced by this tool, not tamper evidence. The ledger is a tracked file, and its history is git's.
+
 ## Alternatives considered
 
 | Alternative | Why rejected |
@@ -326,6 +341,6 @@ Each phase is one sub-issue and one PR, stacked on `main`; epic [#1](https://git
 | 1 | #2 | `lib/orders.cjs`, `select.cjs`, `conflicts.cjs`; router with `validate` (direct CLI); `references/standing-orders.md`; vendored js-yaml; this amendment. | R1, R2, R3, R4, R5 (library), R6 (library), AC7 | Unit tests plus `fast-check` properties: context closure idempotent, conflict detection symmetric, selection monotone in scope; byte-cap tests at limit −1, limit, limit +1; `validate` runnable as a direct CLI. |
 | 2 | #3 | Manifest, `select`/`conflicts`/`coverage` subcommands, `plan:pre` select step, planner contribution, `plan:pre` and `plan:post` gates as step + `predicate`. | R5 (wiring), R6 (gate), R7, R9, R17, AC1, AC2, AC5 | Manifest passes gsd-core's validator; installs from a local path and from git; `standing-orders` family reachable through `gsd_run`. |
 | 3 | #4 | `enforce` step + `execute:wave:post` predicate gate via `check prohibition-enforcement`; check-file edit rule and projection rule extending `coverage`; planner projection of orders into `must_haves` (A6, replacing the `verify:pre` verifier contribution). | R10, R11, R12, AC3, AC4, AC8 | Request-shape contract test against gsd-core 1.19.0 and 1.20.1; RED fixture for a plan editing a check target; a `backstop` order projected as a `verification: backstop` truth, which gsd-verifier reports `insufficient_spec`. |
-| 4 | #5 | `trace`, `impact`, `stale`; `select` warns on stale orders. | R13, R14, R15, AC6 | Append-only property test; hash stable under key reorder; `impact` and `stale` reachable through `gsd_run`. |
+| 4 | #5 | `trace` ship:pre step (commits its own ledger, A7), `impact`, `stale`; `select` warns on stale orders. | R13, R14, R15, AC6 | Append-only property test; hash stable under key reorder; `impact` and `stale` reachable through `gsd_run`. |
 | 5 | #6 | Promotion skill; LLM conflict skill (`agentVerdict`, non-blocking). | R8, R16 | Dismissal-needs-reason and `--auto`-never-dismisses tests. |
 | 6 | #7 | Mutation hardening. | — | Separate ADR before any implementation. |

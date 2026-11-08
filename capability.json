@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "standing-orders",
   "role": "feature",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "title": "Standing Orders",
   "description": "Project-wide, context-scoped business rules: conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
   "tier": "full",
@@ -27,7 +27,7 @@
       "family": "standing-orders",
       "module": "standing-orders-router.cjs",
       "router": "routeStandingOrdersCommand",
-      "subcommands": ["select", "conflicts", "coverage", "enforce", "validate"]
+      "subcommands": ["select", "conflicts", "coverage", "enforce", "trace", "impact", "stale", "validate"]
     }
   ],
   "steps": [
@@ -54,6 +54,14 @@
       "consumes": [],
       "when": "standing-orders.enabled",
       "onError": "halt"
+    },
+    {
+      "point": "ship:pre",
+      "ref": { "command": "standing-orders trace" },
+      "produces": [".planning/standing-orders/TRACE.jsonl"],
+      "consumes": [],
+      "when": "standing-orders.enabled",
+      "onError": "skip"
     }
   ],
   "contributions": [

@@ -14,15 +14,19 @@
  * A router that returns a Promise is rejected by the host.
  *
  * Subcommands: `validate` (phase 1), the loop wiring `select`, `conflicts` and
- * `coverage` (phase 2) and the execution gate `enforce` (phase 3). The same verbs
+ * `coverage` (phase 2), the execution gate `enforce` (phase 3) and the
+ * traceability ledger `trace`, `impact` and `stale` (phase 4). The same verbs
  * are reachable directly:
  *   node standing-orders-router.cjs validate [file] [--raw]
- *   node standing-orders-router.cjs select|conflicts|coverage|enforce (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
- * Exit codes (direct CLI only): 0 ok; 1 invalid, blocked, incomplete or usage
- * error; 2 a file or directory could not be read or resolved.
+ *   node standing-orders-router.cjs select|conflicts|coverage|enforce|trace (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
+ *   node standing-orders-router.cjs impact <order-id> [--raw]
+ *   node standing-orders-router.cjs stale [--raw]
+ * Exit codes (direct CLI only): 0 ok; 1 invalid, blocked, incomplete, stale or
+ * usage error; 2 a file or directory could not be read or resolved.
  *
  * `deps` is a test seam for I/O: { exists, isFile, realpath, statSize, readFile,
- * listDir, writeFile, rename, mkdir, execFile, env, argv, nodePath, log }.
+ * listDir, writeFile, appendFile, rename, mkdir, execFile, env, argv, nodePath,
+ * now, log }.
  */
 
 const fs = require('node:fs');
@@ -32,14 +36,20 @@ const { parseOrders, ERROR_CODES, KINDS, VERIFICATIONS } = require('./lib/orders
 const { detectConflicts } = require('./lib/conflicts.cjs');
 const { readCapabilityConfig } = require('./lib/config.cjs');
 const { collectPhaseInputs, splitReqIds } = require('./lib/phase.cjs');
-const { resolvePhase, runEnforcement } = require('./lib/host.cjs');
+const { resolvePhase, runEnforcement, findHostCli, HOST_TIMEOUT_MS } = require('./lib/host.cjs');
 const { evaluateBlock, evaluateCoverage, evaluateEnforcement, renderVerdict, STATUS } = require('./lib/gate.cjs');
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
-const { errMessage, unique } = require('./lib/util.cjs');
+const { errMessage, unique, isPlainObject, compareStrings } = require('./lib/util.cjs');
+const { TRACE_PATH, MAX_TRACE_BYTES, isValidPhase, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
 
 const FAMILY = 'standing-orders';
-const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'validate']);
-const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce']);
+const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
+const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace']);
+const QUERY_SUBCOMMANDS = Object.freeze(['impact', 'stale']);
+/** Upper bound for the one `git log` call that names the code commit a trace belongs to. */
+const GIT_TIMEOUT_MS = 10000;
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
+const EM_DASH = String.fromCharCode(0x2014);
 const APPLICABLE_PATH = '.planning/standing-orders/APPLICABLE.md';
 const CONFLICTS_PATH = '.planning/standing-orders/CONFLICTS.json';
 const ENFORCEMENT_PATH = '.planning/standing-orders/ENFORCEMENT.json';
@@ -49,6 +59,8 @@ const DEFAULT_ORDERS_PATH = path.join('.planning', 'standing-orders', 'ORDERS.ya
 /** Refuse to read a rules file larger than this (bytes) — a rules file is small by nature. */
 const MAX_FILE_BYTES = 256 * 1024;
 const REPORT_SCHEMA = 1;
+/** Refuse to read an ENFORCEMENT.json larger than this (bytes). */
+const MAX_ENFORCEMENT_BYTES = 16 * 1024 * 1024;
 
 /** Every error code the loop subcommands (select, conflicts, coverage, enforce) emit themselves. */
 const LOOP_CODES = Object.freeze({
@@ -58,6 +70,11 @@ const LOOP_CODES = Object.freeze({
   WRITE_FAILED: 'write_failed',
   INTERNAL_ERROR: 'internal_error',
   ORDERS_FILE_MISSING: 'orders_file_missing',
+  ORDERS_UNUSABLE: 'orders_unusable',
+  TRACE_TOO_LARGE: 'trace_too_large',
+  TRACE_UNREADABLE: 'trace_unreadable',
+  TRACE_NOT_REGULAR: 'trace_not_regular',
+  PHASE_NAME_INVALID: 'phase_name_invalid',
 });
 
 const FILE_ERROR_CODES = new Set([
@@ -81,8 +98,18 @@ function defaultDeps() {
         return false;
       }
     },
+    isSymlink: (p) => {
+      try {
+        return fs.lstatSync(p).isSymbolicLink();
+      } catch (e) {
+        if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return false;
+        throw e;
+      }
+    },
     listDir: (p) => fs.readdirSync(p),
     writeFile: (p, text) => fs.writeFileSync(p, text, { flag: 'wx' }),
+    appendFile: (p, text) => fs.appendFileSync(p, text),
+    now: () => new Date(),
     rename: (from, to) => fs.renameSync(from, to),
     mkdir: (p) => fs.mkdirSync(p, { recursive: true }),
     execFile: (file, args, opts) => require('node:child_process').execFileSync(file, args, opts),
@@ -356,6 +383,11 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
     phaseRel,
     reqIds,
     loadedOrders,
+    inputs,
+    files: selection.files,
+    stale: Object.create(null),
+    staleIds: [],
+    traceWarnings: [],
     applicable,
     applicableIds,
     block,
@@ -385,7 +417,7 @@ function verdictText(ev, coverage, generatedBy, enforcement = STATUS.PENDING, re
 /** APPLICABLE.md text; says so plainly when ORDERS.yaml could not be used, rather than listing nothing. */
 function applicableText(ev, config) {
   const phase = path.basename(ev.phaseDir);
-  const rendered = renderApplicable(ev.applicable, { maxBytes: config.maxBytes, phase });
+  const rendered = renderApplicable(ev.applicable, { maxBytes: config.maxBytes, phase, stale: ev.stale });
   const state = ev.loadedOrders.orders.state;
   if (state !== 'invalid' && state !== 'unreadable') return rendered;
   const empty = renderApplicable([], { maxBytes: Infinity, phase }).text;
@@ -495,6 +527,10 @@ function buildLoopResult({ subcommand, ev, omitted, written, enforced }) {
     written,
   };
   if (subcommand === 'enforce') result.results = enforced.results;
+  if (subcommand === 'select') {
+    result.stale = ev.staleIds;
+    result.warnings = [...ev.warnings, ...ev.traceWarnings];
+  }
   return result;
 }
 
@@ -505,6 +541,332 @@ function bestEffortVerdict({ ev, io, root, generatedBy, coverage = ev.coverageSt
   } catch (e) {
     // the verdict could not be written at all; the failure reported by the caller still names it
   }
+}
+
+// ─── Traceability ledger: trace, impact, stale ────────────────────────────────
+
+function traceProblem(code, message) {
+  return { failure: { code, message } };
+}
+
+/** A failure when the ledger path is a symbolic link (dangling, in the project or outside it), else null. */
+function ledgerLinkProblem(abs, io) {
+  try {
+    if (io.isSymlink(abs)) return traceProblem(LOOP_CODES.TRACE_NOT_REGULAR, `${TRACE_PATH} is a symbolic link; the ledger must be a regular file`);
+  } catch (e) {
+    return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} could not be examined: ${errMessage(e)}`);
+  }
+  return null;
+}
+
+/** Text of a dep result that may be undefined or null. */
+function outputText(out) {
+  return out === undefined || out === null ? '' : String(out);
+}
+
+/**
+ * Read TRACE.jsonl under `root` with the same containment and size guards as every
+ * other file the router reads. A missing ledger is empty text, not a failure.
+ * @returns {{ text: string } | { failure: { code: string, message: string } }}
+ */
+function readTraceFile({ root, io }) {
+  const abs = path.resolve(root, TRACE_PATH);
+  const linked = ledgerLinkProblem(abs, io);
+  if (linked !== null) return linked;
+  if (!io.exists(abs)) return { text: '' };
+  let realFile;
+  try {
+    realFile = io.realpath(abs);
+    if (!isInside(io.realpath(root), realFile)) {
+      return traceProblem(LOOP_CODES.PATH_OUTSIDE_CWD, `${TRACE_PATH} resolves (through a link) outside the project root`);
+    }
+  } catch (e) {
+    return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} could not be examined: ${errMessage(e)}`);
+  }
+  let size;
+  try {
+    size = io.statSize(realFile);
+  } catch (e) {
+    return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} could not be examined: ${errMessage(e)}`);
+  }
+  if (typeof size !== 'number' || !Number.isFinite(size)) return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} has no readable size`);
+  if (size > MAX_TRACE_BYTES) return traceProblem(LOOP_CODES.TRACE_TOO_LARGE, `${TRACE_PATH} is ${size} bytes; the limit is ${MAX_TRACE_BYTES}`);
+  try {
+    return { text: String(io.readFile(abs)) };
+  } catch (e) {
+    return traceProblem(LOOP_CODES.TRACE_UNREADABLE, `${TRACE_PATH} could not be read: ${errMessage(e)}`);
+  }
+}
+
+/**
+ * ENFORCEMENT.json as an object, or null when it is missing, a symbolic link, outside the
+ * project, oversized, unreadable or not an object. Any problem means "unenforced", never an error.
+ */
+function readEnforcement({ root, io }) {
+  const abs = path.resolve(root, ENFORCEMENT_PATH);
+  try {
+    if (io.isSymlink(abs) || !io.exists(abs)) return null;
+    const realFile = io.realpath(abs);
+    if (!isInside(io.realpath(root), realFile)) return null;
+    const size = io.statSize(realFile);
+    if (typeof size !== 'number' || !(size <= MAX_ENFORCEMENT_BYTES)) return null;
+    const parsed = JSON.parse(String(io.readFile(abs)));
+    return isPlainObject(parsed) ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** The last code commit (the ledger's own commits excluded), or null plus a `commit_unresolved` warning. */
+/** First non-blank line of a failure's message, so a subprocess error stays one line. */
+function firstErrorLine(e) {
+  const line = String(errMessage(e)).split(/\r?\n/).map((l) => l.trim()).find((l) => l !== '');
+  return line === undefined ? 'unknown error' : line;
+}
+
+function resolveCommitSha({ root, io }) {
+  const unresolved = (detail) => ({ sha: null, warning: { code: 'commit_unresolved', message: `the code commit could not be resolved (${detail}); records carry commit_sha null` } });
+  let out;
+  try {
+    out = io.execFile('git', ['log', '-1', '--format=%H', '--', '.', `:(exclude)${TRACE_PATH}`], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: GIT_TIMEOUT_MS,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (e) {
+    return unresolved(firstErrorLine(e));
+  }
+  const sha = outputText(out).trim();
+  return COMMIT_SHA_RE.test(sha) ? { sha, warning: null } : unresolved('git printed no commit id');
+}
+
+function notCommitted(reason) {
+  return {
+    commit: { committed: false, hash: null, reason },
+    warning: { code: 'trace_not_committed', message: `TRACE.jsonl was written but not committed: ${reason}` },
+  };
+}
+
+/** Parse the host commit tool's JSON answer (following an `@file:` pointer), or null. */
+function parseHostAnswer(out, io) {
+  let text = outputText(out).trim();
+  try {
+    if (text.startsWith('@file:')) text = String(io.readFile(text.slice('@file:'.length))).trim();
+    const parsed = JSON.parse(text);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Commit TRACE.jsonl through the host's commit tool. Never throws; a failure is a warning, not an error. */
+function commitTrace({ phaseDir, root, io }) {
+  const cli = findHostCli({ env: io.env, argv: io.argv, isFile: io.isFile });
+  if (cli === null) return notCommitted('host_unavailable: the host CLI (gsd-tools) was not found');
+  const message = `docs(standing-orders): trace ${path.basename(phaseDir)} [standing-orders trace]`;
+  let out;
+  try {
+    out = io.execFile(io.nodePath, [cli, 'commit', message, '--files', TRACE_PATH], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: HOST_TIMEOUT_MS,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (e) {
+    return notCommitted(`host_failed: ${firstErrorLine(e)}`);
+  }
+  const answer = parseHostAnswer(out, io);
+  if (answer === null) return notCommitted('host_output_invalid: the host commit output is not a JSON object');
+  if (answer.committed === true) return { commit: { committed: true, hash: typeof answer.hash === 'string' ? answer.hash : null, reason: null }, warning: null };
+  if (answer.skipped === true) return notCommitted(typeof answer.reason === 'string' && answer.reason !== '' ? answer.reason : 'skipped by the host');
+  return notCommitted('host_declined: the host did not commit');
+}
+
+function humanTraceLines(result) {
+  const hash = result.commit.hash === null ? 'none' : result.commit.hash;
+  const lines = [`standing-orders trace: phase ${result.phase.dir} ${EM_DASH} ${result.appended.length} record(s) appended, ${result.skipped.length} already traced; commit ${hash}`];
+  for (const w of result.warnings) lines.push(`  ${w.code}: ${w.message}`);
+  return lines;
+}
+
+function traceResult({ ev, appended, skipped, commitSha, commit, warnings, written }) {
+  return {
+    schema: REPORT_SCHEMA,
+    subcommand: 'trace',
+    ok: true,
+    disabled: false,
+    phase: { dir: ev.phaseRel, reqIds: ev.reqIds },
+    applicable: ev.applicableIds,
+    appended,
+    skipped,
+    commit_sha: commitSha,
+    commit,
+    warnings,
+    written,
+  };
+}
+
+/** Append the new ledger records and commit them. Writes only TRACE.jsonl. */
+function appendAndCommit({ ev, root, io, records, warnings, commitSha, error }) {
+  const none = { committed: false, hash: null, reason: null };
+  const unusable = prepareOutputDir({ subcommand: 'trace', root, io });
+  if (unusable !== null) return loopFailure('trace', unusable.code, unusable.message, [], error);
+  const existing = readTraceFile({ root, io });
+  if (existing.failure !== undefined) return loopFailure('trace', existing.failure.code, existing.failure.message, [], error);
+  const parsed = parseTrace(existing.text);
+  const diff = newRecords(parsed.records, records);
+  const all = [...warnings, ...parsed.warnings];
+  const ids = diff.append.map((r) => r.order_id);
+  if (diff.append.length === 0) return traceResult({ ev, appended: [], skipped: diff.skipped, commitSha, commit: none, warnings: all, written: [] });
+  const target = path.resolve(root, TRACE_PATH);
+  const relinked = ledgerLinkProblem(target, io);
+  if (relinked !== null) return loopFailure('trace', relinked.failure.code, relinked.failure.message, [], error);
+  try {
+    io.appendFile(target, appendText(existing.text, diff.append));
+  } catch (e) {
+    return loopFailure('trace', LOOP_CODES.WRITE_FAILED, `trace: could not write ${TRACE_PATH}: ${errMessage(e)}`, [], error);
+  }
+  const committed = commitTrace({ phaseDir: ev.phaseDir, root, io });
+  if (committed.warning !== null) all.push(committed.warning);
+  return traceResult({ ev, appended: ids, skipped: diff.skipped, commitSha, commit: committed.commit, warnings: all, written: [TRACE_PATH] });
+}
+
+/** `trace`: record every applicable order in TRACE.jsonl (append-only, de-duplicated) and commit it. */
+function runTrace({ ev, root, io, error }) {
+  const state = ev.loadedOrders.orders.state;
+  if (state === 'invalid' || state === 'unreadable') {
+    return loopFailure('trace', LOOP_CODES.ORDERS_UNUSABLE, `trace: ORDERS.yaml could not be used (${state}); run standing-orders validate`, [], error);
+  }
+  const warnings = [...ev.warnings];
+  if (ev.applicable.length === 0) {
+    return traceResult({ ev, appended: [], skipped: [], commitSha: null, commit: { committed: false, hash: null, reason: null }, warnings, written: [] });
+  }
+  if (!isValidPhase(ev.phaseRel)) {
+    return loopFailure('trace', LOOP_CODES.PHASE_NAME_INVALID, `trace: phase directory ${JSON.stringify(ev.phaseRel)} cannot be recorded; use letters, digits, ".", "_", "-" and "/" only (at most 200 characters, no "..")`, [], error);
+  }
+  const git = resolveCommitSha({ root, io });
+  if (git.warning !== null) warnings.push(git.warning);
+  const records = buildRecords({
+    applicable: ev.applicable,
+    document: ev.loadedOrders.document,
+    phaseRel: ev.phaseRel,
+    plans: ev.inputs.plans,
+    files: ev.files,
+    enforcement: readEnforcement({ root, io }),
+    commitSha: git.sha,
+    ts: io.now().toISOString(),
+  });
+  return appendAndCommit({ ev, root, io, records, warnings, commitSha: git.sha, error });
+}
+
+/** Print a trace result (a failure was already reported through `error`). */
+function emitTrace({ result, rawOut, io }) {
+  if (result.ok === false) return result;
+  if (rawOut) io.log(JSON.stringify(result));
+  else for (const l of humanTraceLines(result)) io.log(l);
+  return result;
+}
+
+/** For `select`: mark the applicable orders whose latest trace is stale. A bad ledger only adds a warning. */
+function attachStale(ev, root, io) {
+  const document = ev.loadedOrders.document;
+  const trace = readTraceFile({ root, io });
+  if (trace.failure !== undefined) {
+    ev.traceWarnings.push({ code: LOOP_CODES.TRACE_UNREADABLE, message: `${trace.failure.message}; stale orders are not marked` });
+    return;
+  }
+  if (document === null) return;
+  const applicable = new Set(ev.applicableIds);
+  for (const s of staleOf({ records: parseTrace(trace.text).records, document })) {
+    if (!applicable.has(s.id)) continue;
+    ev.stale[s.id] = { reason: s.reason, last_phase: s.last_phase };
+  }
+  ev.staleIds = Object.keys(ev.stale).sort(compareStrings);
+}
+
+/** Parse `impact <id>` / `stale` arguments. Returns { options } or { usage: message }. */
+function parseQueryFlags(subcommand, rest) {
+  const usageText = subcommand === 'impact' ? 'Usage: standing-orders impact <order-id> [--raw]' : 'Usage: standing-orders stale [--raw]';
+  const options = { id: null };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (typeof a !== 'string') return { usage: `${FAMILY} ${subcommand}: unexpected argument ${JSON.stringify(a)}. ${usageText}` };
+    if (a === '--raw') continue;
+    if (a === '--ws') {
+      const value = rest[i + 1];
+      if (typeof value !== 'string' || value.startsWith('-')) return { usage: `${FAMILY} ${subcommand}: flag ${a} needs a value. ${usageText}` };
+      i += 1;
+    } else if (a.startsWith('-')) return { usage: `${FAMILY} ${subcommand}: unknown flag ${JSON.stringify(a)}. ${usageText}` };
+    else positionals.push(a);
+  }
+  if (positionals.length !== (subcommand === 'impact' ? 1 : 0)) return { usage: `${FAMILY} ${subcommand}: wrong number of arguments. ${usageText}` };
+  options.id = positionals.length > 0 ? positionals[0] : null;
+  return { options };
+}
+
+function humanPhaseLine(p) {
+  const list = (xs) => (Array.isArray(xs) && xs.length > 0 ? xs.join(', ') : '-');
+  const commit = typeof p.commit_sha === 'string' && p.commit_sha !== '' ? p.commit_sha.slice(0, 7) : 'none';
+  return `  ${p.phase}: ${p.disposition}${p.hash_mismatch === true ? ', order changed since' : ''}; commit ${commit}; plans ${list(p.plans)}; files ${list(p.files)}`;
+}
+
+function humanQueryLines(result) {
+  if (result.subcommand === 'stale') {
+    const lines = [`standing-orders stale: ${result.stale.length} stale order(s)`];
+    for (const s of result.stale) lines.push(`  ${s.id}: ${s.reason} since last traced in ${s.last_phase}`);
+    for (const w of result.warnings) lines.push(`  ${w.code}: ${w.message}`);
+    return lines;
+  }
+  const lines = [`standing-orders impact: ${result.id} ${EM_DASH} ${result.status}; ${result.phases.length} phase(s) traced`];
+  for (const p of result.phases) lines.push(humanPhaseLine(p));
+  for (const w of result.warnings) lines.push(`  ${w.code}: ${w.message}`);
+  return lines;
+}
+
+/** A failed query: with --raw the failure is also printed as JSON (the host shows only the error text), then reported. */
+function queryFailure({ subcommand, code, message, rawOut, io, error }) {
+  const result = { schema: REPORT_SCHEMA, subcommand, ok: false, errors: [{ code, message }], written: [] };
+  if (rawOut) io.log(JSON.stringify(result));
+  error(message);
+  return result;
+}
+
+/** The document a query compares the ledger with: a MISSING ORDERS.yaml is an empty one (every traced order is removed); an unusable one is null. */
+function queryDocument(loaded) {
+  if (loaded.stage === 'ok') return loaded.document;
+  const first = loaded.report.errors[0];
+  if (loaded.stage === 'file' && first && first.code === ERROR_CODES.FILE_NOT_FOUND) return { orders: [], contexts: {}, leafSets: {}, allLeaves: [] };
+  return null;
+}
+
+/** `impact <id>` and `stale`: read-only queries over TRACE.jsonl and ORDERS.yaml; not gated on `enabled`. */
+function runQueryCommand({ subcommand, rest, cwd, raw, error, io }) {
+  const rawOut = raw === true || rest.includes('--raw');
+  const fail = (code, message) => queryFailure({ subcommand, code, message, rawOut, io, error });
+  const parsed = parseQueryFlags(subcommand, rest);
+  if (parsed.usage !== undefined) return fail(LOOP_CODES.USAGE, parsed.usage);
+  const root = path.resolve(cwd);
+  const loaded = loadOrders({ cwd: root, fileArg: DEFAULT_ORDERS_PATH, deps: io });
+  const document = queryDocument(loaded);
+  const trace = readTraceFile({ root, io });
+  if (trace.failure !== undefined) return fail(trace.failure.code, trace.failure.message);
+  const ledger = parseTrace(trace.text);
+  let result;
+  if (subcommand === 'impact') {
+    result = { schema: REPORT_SCHEMA, subcommand, ok: true, ...impactOf({ id: parsed.options.id, records: ledger.records, document }), warnings: ledger.warnings };
+  } else {
+    if (document === null) return fail(LOOP_CODES.ORDERS_UNUSABLE, 'stale: ORDERS.yaml could not be used; run standing-orders validate');
+    result = { schema: REPORT_SCHEMA, subcommand, ok: true, stale: staleOf({ records: ledger.records, document }), warnings: ledger.warnings };
+  }
+  if (rawOut) io.log(JSON.stringify(result));
+  else for (const l of humanQueryLines(result)) io.log(l);
+  return result;
 }
 
 function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
@@ -528,6 +890,8 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
   const reqIds = options.reqIds !== null ? splitReqIds(options.reqIds) : phase.reqIds;
 
   const ev = evaluateLoop({ subcommand, options, root, phaseDir: phase.phaseDir, reqIds, config, io });
+  if (subcommand === 'trace') return emitTrace({ result: runTrace({ ev, root, io, error }), rawOut, io });
+  if (subcommand === 'select') attachStale(ev, root, io);
 
   if (subcommand === 'select' || subcommand === 'enforce') {
     const unusable = prepareOutputDir({ subcommand, root, io });
@@ -579,9 +943,10 @@ function humanLines(report) {
 function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = false, error = () => {}, deps = {} }) {
   const io = { ...defaultDeps(), ...deps };
   const subcommand = args[1];
-  if (LOOP_SUBCOMMANDS.includes(subcommand)) {
+  if (LOOP_SUBCOMMANDS.includes(subcommand) || QUERY_SUBCOMMANDS.includes(subcommand)) {
+    const run = LOOP_SUBCOMMANDS.includes(subcommand) ? runLoopCommand : runQueryCommand;
     try {
-      return runLoopCommand({ subcommand, rest: args.slice(2), cwd, raw, error, io });
+      return run({ subcommand, rest: args.slice(2), cwd, raw, error, io });
     } catch (e) {
       const message = `${FAMILY} ${subcommand}: internal error: ${errMessage(e)}`;
       error(message);
@@ -616,10 +981,18 @@ function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = fals
   return report;
 }
 
-/** Exit code for the direct CLI: 0 ok; 2 the file could not be read; 1 otherwise. */
+function isUsageFailure(report) {
+  return Array.isArray(report.errors) && report.errors.some((e) => e.code === LOOP_CODES.USAGE);
+}
+
+/** Exit code for the direct CLI: 0 ok; 2 the file could not be read; 1 otherwise (`stale`: 1 when any order is stale). */
 function exitCodeFor(report) {
+  if (QUERY_SUBCOMMANDS.includes(report.subcommand)) {
+    if (report.ok === false) return isUsageFailure(report) ? 1 : 2;
+    return report.subcommand === 'stale' && Array.isArray(report.stale) && report.stale.length > 0 ? 1 : 0;
+  }
   if (LOOP_SUBCOMMANDS.includes(report.subcommand)) {
-    if (report.ok === false) return Array.isArray(report.errors) && report.errors.some((e) => e.code === LOOP_CODES.USAGE) ? 1 : 2;
+    if (report.ok === false) return isUsageFailure(report) ? 1 : 2;
     if (report.disabled === true) return 0;
     if (report.conflicts === STATUS.BLOCKED || report.coverage === STATUS.INCOMPLETE || report.coverage === STATUS.ERROR) return 1;
     if (report.enforcement === STATUS.FLAGGED || report.enforcement === STATUS.ERROR) return 1;
@@ -640,4 +1013,4 @@ if (require.main === module) {
   process.exitCode = exitCodeFor(report);
 }
 
-module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, ENFORCEMENT_PATH, MAX_FILE_BYTES, SUBCOMMANDS, REPORT_SCHEMA, LOOP_CODES };
+module.exports = { routeStandingOrdersCommand, validateFile, exitCodeFor, isInside, loadOrders, DEFAULT_ORDERS_PATH, APPLICABLE_PATH, CONFLICTS_PATH, ENFORCEMENT_PATH, TRACE_PATH, MAX_FILE_BYTES, GIT_TIMEOUT_MS, SUBCOMMANDS, REPORT_SCHEMA, LOOP_CODES };

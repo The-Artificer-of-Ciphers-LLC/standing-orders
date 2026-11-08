@@ -126,6 +126,7 @@ A `test`-tier order whose `check_target` does not exist under the project root i
 - Whole orders are packed while the total, including the footer, stays within `standing-orders.max_bytes` (default 6000) measured in UTF-8 bytes. An order is never truncated mid-body.
 - Each order block ends with a `- Project as:` line: the exact `must_haves` item the planner copies into a plan (see *Projection*).
 - Every rendered scalar is one line; control characters are replaced with U+FFFD.
+- An applicable order that is stale (see *Trace*) gets a `- Stale: <reason> since last traced in <phase>; re-check this order before planning` line after `- Source:`, inside its block, so the byte cap counts it. With no `TRACE.jsonl`, or no stale applicable order, the output is unchanged.
 - A footer always states `N applicable order(s) omitted to stay within the byte cap.` (The cap value itself is not embedded, so the footer's length depends only on the count.)
 
 ## Configuration
@@ -134,7 +135,7 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts`, `coverage` and `enforce` write nothing. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
+| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts`, `coverage`, `enforce` and `trace` write nothing. `impact`, `stale` and `validate` only read, and answer either way. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
 | `standing-orders.block_on` | enum | `conflict` | What blocks planning. An unknown value falls back to `conflict` with warning `config_invalid`. |
 | `standing-orders.max_bytes` | number | `6000` | UTF-8 byte cap for `APPLICABLE.md`. Must be a whole number ≥ 0; anything else (including the string `"6000"`) falls back to `6000` with warning `config_invalid`. |
 
@@ -152,6 +153,7 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 | `plan:post` | gate, blocking | `coverage == complete`. |
 | `execute:wave:post` | step `standing-orders enforce` | Runs every applicable `test` order's check through gsd-core's fail-first prover; writes `ENFORCEMENT.json` and the verdict's `enforcement`. |
 | `execute:wave:post` | gate, blocking | `enforcement == clear`. |
+| `ship:pre` | step `standing-orders trace` | Appends one `TRACE.jsonl` record per applicable order and commits that file alone through the host's commit tool. Sole writer of the trace (ADR-5057). `onError: skip`: a step never blocks ship. |
 
 Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not yet run third-party `plan:pre` command steps or gates ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)); until it does, the planner-run `select` is the `plan:pre` check and the `plan:post` gates are the mechanical block (ADR-0001 A5). There is no `verify:pre` hook: orders reach `gsd-verifier` as projected `must_haves` (ADR-0001 A6, [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984)).
 
@@ -240,6 +242,61 @@ with the project root as working directory (no shell; the statement is cut to 50
 Any other reason is the host's own. `.planning/standing-orders/ENFORCEMENT.json` is `{ schema: 1, phase, status, results }`; each result is `{ id, status, flagged, reason, located, kind, evidence }` as the host returned it. Each unproven order adds an `enforcement_flagged` reason to the verdict body.
 
 `block_on` does not apply to enforcement: it decides what blocks planning only.
+
+## Trace
+
+`.planning/standing-orders/TRACE.jsonl` is an append-only ledger: one JSON object per line, written only by `standing-orders trace` at `ship:pre` (ADR-0001 §7, A7). Each record, keys in this order:
+
+| Key | Value |
+|---|---|
+| `schema` | `1` |
+| `order_id` | The order's `id`. |
+| `order_hash` | `sha256:<64 hex>` over canonical JSON of the normalized order: keys sorted, `contexts`, `scope.paths` and `scope.requirements` sorted and de-duplicated, null fields and empty lists omitted. Stable under key and list reordering and reformatting. |
+| `contexts` | The order's effective leaf contexts, sorted (`*` when the document declares none). |
+| `phase` | The phase directory relative to the project root. |
+| `plans` | The phase's plans whose `must_haves` cite the order, sorted. |
+| `files` | The phase's files matched by the order's `scope.paths`, sorted; `[]` when it has none. |
+| `check` | `{ kind, target, rule? }` for a `test` order; `null` for `backstop`. |
+| `disposition` | `proven` (this phase's `ENFORCEMENT.json` has the host's `green`, unflagged answer), `flagged` (it has any other answer), `unenforced` (no result for this phase) or `insufficient_spec` (`backstop`). |
+| `commit_sha` | The last commit touching anything other than `TRACE.jsonl` (`git log -1 --format=%H -- . ':(exclude).planning/standing-orders/TRACE.jsonl'`, bounded at 10 s), or `null` with warning `commit_unresolved`. |
+| `ts` | ISO-8601 time of the trace. |
+
+- A candidate whose `(order_id, order_hash, phase, commit_sha)` is already in the file is not appended, so a ship re-run adds nothing.
+- New records are appended in one write; when the file does not end in a newline, one is written first. Existing bytes are never rewritten.
+- When reading, a line that is not a valid record is skipped with warning `trace_line_invalid` (its line number in the message). A valid record's `phase` matches `^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$` with no `..` segment, its `order_id` is at most 200 characters, and no line is longer than 65 536 characters. These limits keep a hand-crafted ledger from smuggling text into `APPLICABLE.md`, which the planner reads.
+- `TRACE.jsonl` must be a regular file: a symbolic link there (dangling, inside the project or outside it) is refused with `trace_not_regular`, and nothing is written through it. A file over 32 MiB is refused (`trace_too_large`); an output directory resolving outside the project, also through a link, is refused (`path_outside_cwd`).
+- `ENFORCEMENT.json` is read with the same guards (inside the project, not a link, at most 16 MiB); when it cannot be used, `test` orders are recorded `unenforced`.
+- After appending, `trace` runs `gsd-tools commit "docs(standing-orders): trace <phase> [standing-orders trace]" --files .planning/standing-orders/TRACE.jsonl`, bounded like the other host calls. The host applies `commit_docs`; when it skips, fails, or no host CLI is found, the file stays uncommitted and `trace` warns `trace_not_committed`.
+- An order is **stale** when its latest record differs from the current `ORDERS.yaml`: `changed` (different `order_hash`), `removed` (no such id) or `contexts_changed` (same hash, different effective leaf contexts). An order never traced is not stale.
+
+Append-only is enforced by this tool, not tamper-evident: the file is tracked, and its history is git's.
+
+## Commands: `standing-orders trace | impact | stale`
+
+```
+gsd-tools standing-orders trace  (--phase <N> | --phase-dir <dir>) [--req-ids "A, B"] [--files a,b] [--raw]
+gsd-tools standing-orders impact <order-id> [--raw]
+gsd-tools standing-orders stale [--raw]
+```
+
+- `standing-orders trace` selects the applicable orders exactly as `select` does and writes only `TRACE.jsonl`. With `--raw`: `{ schema: 1, subcommand: "trace", ok, disabled, phase: { dir, reqIds }, applicable, appended, skipped, commit_sha, commit: { committed, hash, reason }, warnings, written }`. No applicable order, or nothing new, writes and commits nothing. A missing `ORDERS.yaml` traces nothing (warning `orders_file_missing`); an invalid or unreadable one fails with `orders_unusable`.
+- `standing-orders impact` (`<order-id>` required) reads `ORDERS.yaml` and `TRACE.jsonl`: `{ schema: 1, subcommand: "impact", ok, id, traced, status, current_hash, hash_mismatch, contexts_changed, phases, warnings }`. `phases` holds the latest record per shipped phase, sorted by phase: `{ phase, plans, files, check, disposition, commit_sha, ts, order_hash, hash_mismatch }`. `status` is `untraced`, `current`, `changed`, `removed` or `orders_unusable` (`ORDERS.yaml` could not be read, so `hash_mismatch` is `null`).
+- `standing-orders stale` lists every stale order: `{ schema: 1, subcommand: "stale", ok, stale: [{ id, reason, last_phase, last_hash, current_hash }], warnings }`, sorted by id. An invalid `ORDERS.yaml` fails with `orders_unusable`.
+- `impact` and `stale` write nothing and do not require `standing-orders.enabled`. A missing `ORDERS.yaml` counts as no orders, so every traced order is `removed`. `--ws <name>` is accepted and ignored; any other flag is a usage error. With `--raw`, a failure is also printed as one JSON line `{ schema: 1, subcommand, ok: false, errors: [{ code, message }], written: [] }`, because the host shows only the error text otherwise.
+- `select` adds `stale` (the ids of applicable stale orders, sorted) to its result, and any ledger read problem to `warnings`.
+
+Direct-CLI exit codes: `trace` as the loop commands below (0 ok or disabled, 1 usage, 2 could not look); `impact` 0 answered, 1 usage, 2 could not look; `stale` 0 nothing stale, 1 at least one stale order or a usage error, 2 could not look.
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `orders_unusable` | error | `ORDERS.yaml` is invalid or unreadable, so nothing can be traced or compared. |
+| `trace_too_large` | error | `TRACE.jsonl` exceeds 32 MiB. |
+| `trace_not_regular` | error | `TRACE.jsonl` is a symbolic link; it is neither read nor written. |
+| `phase_name_invalid` | error | The phase directory's path does not fit the record's `phase` pattern; nothing was traced. |
+| `trace_unreadable` | error / warning | `TRACE.jsonl` could not be read; an error for `impact` and `stale`, a warning for `select` (which then marks nothing stale). |
+| `trace_line_invalid` | warning | A `TRACE.jsonl` line is not a valid record and was skipped. |
+| `commit_unresolved` | warning | git could not name the shipped commit; records carry `commit_sha: null`. |
+| `trace_not_committed` | warning | `TRACE.jsonl` was written but not committed; the message says why. |
 
 ## Commands: `standing-orders select | conflicts | coverage | enforce`
 

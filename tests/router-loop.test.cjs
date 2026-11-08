@@ -63,7 +63,7 @@ const noWrites = (m) => {
 
 describe('router loop subcommands', () => {
   it('exportsTheSubcommandTable', () => {
-    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'validate']);
+    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
     assert.equal(APPLICABLE_PATH, '.planning/standing-orders/APPLICABLE.md');
     assert.equal(CONFLICTS_PATH, '.planning/standing-orders/CONFLICTS.json');
     assert.equal(ENFORCEMENT_PATH, '.planning/standing-orders/ENFORCEMENT.json');
@@ -832,10 +832,10 @@ describe('router select and coverage enforcement field', () => {
     const m = setup();
     const r = run(m, 'nope');
     assert.equal(r.ok, false);
-    assert.ok(r.error.includes('Available: select, conflicts, coverage, enforce, validate'), r.error);
+    assert.ok(r.error.includes('Available: select, conflicts, coverage, enforce, trace, impact, stale, validate'), r.error);
     assert.ok(m.calls.error[0].includes('enforce'));
     const none = routeStandingOrdersCommand({ args: ['standing-orders'], cwd: m.cwd, raw: true, error: m.error, deps: m.deps });
-    assert.ok(none.error.includes('Available: select, conflicts, coverage, enforce, validate'), none.error);
+    assert.ok(none.error.includes('Available: select, conflicts, coverage, enforce, trace, impact, stale, validate'), none.error);
   });
 });
 
@@ -881,5 +881,172 @@ describe('router coverage check-file and projection rules', () => {
     const uncited = run(setup({ orders: TEST_ONLY, files: { [PLAN]: planText({ truths: ['unrelated'] }) } }), 'coverage');
     assert.deepEqual(uncited.uncited, ['T-A']);
     assert.deepEqual(uncited.notProjected, []);
+  });
+});
+
+describe('router select and the trace ledger', () => {
+  const { orderHash, TRACE_PATH } = require('../lib/trace.cjs');
+  const { parsed } = require('./helpers/fixtures.cjs');
+  const D = String.fromCharCode(0x2014);
+  const HEADER =
+    `# Applicable standing orders ${D} phase 03-billing\n\n` +
+    "These orders apply in addition to the phase's own must_haves, never instead of them. Cite each order id in must_haves; never list an order's check target in files_modified.\n\n";
+  // Captured from the router before the ledger existed (phase 3 output): the no-trace bytes must not move.
+  const GOLDEN =
+    HEADER +
+    '## BILL-RULE (invariant, backstop)\n' +
+    '- Statement: Something always holds.\n' +
+    `- Operation: ${D}\n` +
+    '- Contexts: all\n' +
+    '- Scope: paths [src/billing/**]; requirements []\n' +
+    `- Check: backstop ${D} no mechanical check; the verifier reports insufficient_spec\n` +
+    '- Project as: must_haves.truths item {"statement":"BILL-RULE: Something always holds.","verification":"backstop"}\n' +
+    `- Source: ${D}\n\n` +
+    '0 applicable order(s) omitted to stay within the byte cap.\n';
+
+  const TWO = doc({ orders: [order({ id: 'BILL-A', statement: 'Rule A.', scope: SCOPE_BILLING }), order({ id: 'BILL-B', statement: 'Rule B.', scope: SCOPE_BILLING })] });
+  const specOf = (statementA) => ({ orders: [order({ id: 'BILL-A', statement: statementA, scope: SCOPE_BILLING }), order({ id: 'BILL-B', statement: 'Rule B.', scope: SCOPE_BILLING })] });
+  const hashOf = (id, statementA = 'Rule A.') => orderHash(parsed(specOf(statementA)).orders.find((o) => o.id === id));
+  const OLD_PHASE = '.planning/phases/02-old';
+  const record = (id, overrides = {}) =>
+    JSON.stringify({
+      schema: 1,
+      order_id: id,
+      order_hash: hashOf(id),
+      contexts: ['*'],
+      phase: OLD_PHASE,
+      plans: [],
+      files: [],
+      check: null,
+      disposition: 'insufficient_spec',
+      commit_sha: null,
+      ts: '2026-11-01T00:00:00.000Z',
+      ...overrides,
+    }) + '\n';
+  const sectionOf = (text, id) => {
+    const start = text.indexOf(`## ${id} `);
+    assert.notEqual(start, -1, `${id} present`);
+    const next = text.indexOf('\n## ', start + 1);
+    const end = next === -1 ? text.indexOf('\n\n', start + 1) : next;
+    return text.slice(start, end);
+  };
+
+  // Row 34: no ledger means the same bytes as before the ledger existed.
+  it('noTraceByteIdentical', () => {
+    const m = setup();
+    const r = run(m, 'select');
+    assert.equal(r.ok, true);
+    assert.equal(m.read(APPLICABLE_PATH), GOLDEN);
+    assert.deepEqual(r.stale, []);
+    assert.ok(!r.warnings.some((w) => w.code === 'trace_unreadable'));
+    assert.equal(m.calls.appendFile.length, 0, 'select never writes the ledger');
+
+    // an empty ledger changes nothing either
+    const withTrace = setup({ files: { [TRACE_PATH]: '' } });
+    const rt = run(withTrace, 'select');
+    assert.equal(withTrace.read(APPLICABLE_PATH), GOLDEN);
+    assert.deepEqual(rt.stale, []);
+  });
+
+  // Row 35.
+  it('selectMarksStale', () => {
+    const baseline = setup({ orders: TWO });
+    run(baseline, 'select');
+    const plain = baseline.read(APPLICABLE_PATH);
+    assert.ok(!plain.includes('Stale:'));
+
+    const ledger = record('BILL-A', { order_hash: hashOf('BILL-A', 'Rule A, as first traced.') }) + record('BILL-B');
+    const m = setup({ orders: TWO, files: { [TRACE_PATH]: ledger } });
+    const r = run(m, 'select');
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.stale, ['BILL-A']);
+    assert.deepEqual(r.applicable, ['BILL-A', 'BILL-B']);
+    const text = m.read(APPLICABLE_PATH);
+    const staleLine = `- Stale: changed since last traced in ${OLD_PHASE}; re-check this order before planning`;
+    assert.equal(text.split('\n').filter((l) => l.startsWith('- Stale:')).length, 1);
+    const blockA = sectionOf(text, 'BILL-A').split('\n');
+    const source = blockA.findIndex((l) => l.startsWith('- Source:'));
+    assert.equal(blockA[source + 1], staleLine, 'the Stale line follows Source, inside the block');
+    assert.equal(blockA.length, sectionOf(plain, 'BILL-A').split('\n').length + 1, 'exactly one line added');
+    assert.equal(sectionOf(text, 'BILL-B'), sectionOf(plain, 'BILL-B'), 'a current order block is unchanged');
+    assert.equal(exitCodeFor(r), 0, 'stale never blocks planning');
+    assert.equal(m.calls.appendFile.length, 0);
+
+    // contexts_changed is reported with its own reason; a later current record clears the mark
+    const ctx = setup({ orders: TWO, files: { [TRACE_PATH]: record('BILL-A', { contexts: ['old-leaf'] }) } });
+    const rc = run(ctx, 'select');
+    assert.deepEqual(rc.stale, ['BILL-A']);
+    assert.ok(ctx.read(APPLICABLE_PATH).includes(`- Stale: contexts_changed since last traced in ${OLD_PHASE}; re-check this order before planning`));
+
+    const cleared = setup({ orders: TWO, files: { [TRACE_PATH]: record('BILL-A', { order_hash: hashOf('BILL-A', 'older text') }) + record('BILL-A') } });
+    assert.deepEqual(run(cleared, 'select').stale, []);
+    assert.equal(cleared.read(APPLICABLE_PATH), plain);
+
+    // a traced order that is no longer in ORDERS.yaml is not applicable, so it is not marked
+    const gone = setup({ orders: TWO, files: { [TRACE_PATH]: record('GONE-RULE', { order_hash: 'sha256:' + 'c'.repeat(64) }) } });
+    assert.deepEqual(run(gone, 'select').stale, []);
+    assert.equal(gone.read(APPLICABLE_PATH), plain);
+  });
+
+  // Row 37: planning never depends on the ledger.
+  it('selectIgnoresBadTrace', () => {
+    const baseline = setup();
+    run(baseline, 'select');
+    const plain = baseline.read(APPLICABLE_PATH);
+    assert.equal(plain, GOLDEN);
+
+    const unreadable = setup({ files: { [TRACE_PATH]: 'x\n' } });
+    const realRead = unreadable.deps.readFile;
+    unreadable.deps.readFile = (p) => {
+      if (p.endsWith('TRACE.jsonl')) throw new Error('EIO');
+      return realRead(p);
+    };
+    const oversize = setup({ files: { [TRACE_PATH]: 'x\n' } });
+    const realSize = oversize.deps.statSize;
+    oversize.deps.statSize = (p) => (p.endsWith('TRACE.jsonl') ? 32 * 1024 * 1024 + 1 : realSize(p));
+    const outside = setup({ files: { [TRACE_PATH]: 'x\n' }, links: { [TRACE_PATH]: '/etc/outside/TRACE.jsonl' } });
+
+    for (const [name, m] of [['unreadable', unreadable], ['oversize', oversize], ['outside', outside]]) {
+      const r = run(m, 'select');
+      assert.equal(r.ok, true, name);
+      assert.equal(r.conflicts, 'clear', name);
+      assert.deepEqual(r.stale, [], name);
+      assert.ok(r.warnings.some((w) => w.code === 'trace_unreadable'), `${name}: ${JSON.stringify(r.warnings)}`);
+      assert.equal(m.read(APPLICABLE_PATH), plain, name);
+      assert.deepEqual(r.written, [VERDICT, APPLICABLE_PATH, CONFLICTS_PATH], name);
+      assert.equal(exitCodeFor(r), 0, name);
+    }
+
+    // a ledger of corrupt lines only is also harmless
+    const corrupt = setup({ files: { [TRACE_PATH]: 'garbage\n{"x":\n' } });
+    const rc = run(corrupt, 'select');
+    assert.equal(rc.ok, true);
+    assert.equal(corrupt.read(APPLICABLE_PATH), plain);
+    assert.deepEqual(rc.stale, []);
+  });
+
+  // R5: an order whose id is a prototype key is marked like any other.
+  it('anOrderNamedProtoIsMarkedStale', () => {
+    const protoOrder = order({ id: '__proto__', statement: 'Proto rule.', scope: SCOPE_BILLING });
+    const line =
+      JSON.stringify({
+        schema: 1,
+        order_id: '__proto__',
+        order_hash: 'sha256:' + '1'.repeat(64),
+        contexts: ['*'],
+        phase: OLD_PHASE,
+        plans: [],
+        files: [],
+        check: null,
+        disposition: 'insufficient_spec',
+        commit_sha: null,
+        ts: '2026-11-01T00:00:00.000Z',
+      }) + '\n';
+    const m = setup({ orders: doc({ orders: [protoOrder] }), files: { [TRACE_PATH]: line } });
+    const r = run(m, 'select');
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.applicable, ['__proto__']);
+    assert.deepEqual(r.stale, ['__proto__']);
+    assert.match(sectionOf(m.read(APPLICABLE_PATH), '__proto__'), /- Stale: changed since last traced in /);
   });
 });

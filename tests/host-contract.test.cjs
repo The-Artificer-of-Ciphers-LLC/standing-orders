@@ -153,7 +153,10 @@ gated('manifestValidates', () => {
   assert.deepEqual(v.validateCapability(cap, 'standing-orders'), []);
   assert.deepEqual(v.validateAgainstContract(cap, 'standing-orders'), []);
   assert.deepEqual(v.materializeHookFragments(cap, dir), []);
-  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'validate']);
+  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
+  assert.deepEqual(cap.steps.filter((s) => s.point === 'ship:pre'), [
+    { point: 'ship:pre', ref: { command: 'standing-orders trace' }, produces: ['.planning/standing-orders/TRACE.jsonl'], consumes: [], when: 'standing-orders.enabled', onError: 'skip' },
+  ]);
   assert.equal(cap.engines.gsd, '>=1.19.0 <2.0.0');
   assert.ok(cap.steps.some((s) => s.point === 'execute:wave:post' && s.ref.command === 'standing-orders enforce'));
   assert.ok(cap.gates.some((g) => g.point === 'execute:wave:post' && g.check.predicate.field === 'enforcement' && g.check.predicate.equals === 'clear'));
@@ -338,6 +341,55 @@ gated('hostRunsEnforceAndPredicateReadsVerdict', () => {
   assert.deepEqual(report.results, [], 'only backstop orders applied, so the host was not asked to prove anything');
   assert.equal(check().block, false);
   assert.ok(fs.existsSync(path.join(cwd, '.planning', 'standing-orders', 'ENFORCEMENT.json')));
+});
+
+// Row 38: the ship:pre trace step validates and renders on the real host (1.19 / 1.20), only when enabled.
+gated('shipPreStepRenders', () => {
+  const bundle = makeBundle();
+  const on = makeProject({ 'standing-orders': { enabled: true } });
+  install(on, bundle);
+  const hooks = ours(JSON.parse(renderHooks(on, 'ship:pre')).activeHooks);
+  const steps = hooks.filter((h) => h.ref && h.ref.command === 'standing-orders trace');
+  assert.equal(steps.length, 1, JSON.stringify(hooks));
+  assert.equal(steps[0].capId, 'standing-orders');
+  assert.equal(hooks.filter((h) => h.check && h.check.predicate).length, 0, 'trace is a step, never a gate: it cannot block ship');
+
+  for (const config of [{}, { 'standing-orders': { enabled: false } }]) {
+    const off = makeProject(config);
+    install(off, bundle);
+    const offHooks = ours(JSON.parse(renderHooks(off, 'ship:pre')).activeHooks);
+    assert.equal(offHooks.filter((h) => h.ref && h.ref.command === 'standing-orders trace').length, 0, JSON.stringify(config));
+  }
+});
+
+// Row 39: impact and stale are reachable through the host's dispatcher like every other subcommand.
+gated('impactAndStaleViaGsdRun', () => {
+  const bundle = makeBundle();
+  const project = makeProject({ 'standing-orders': { enabled: false } });
+  install(project, bundle);
+  const { cwd, home } = project;
+  writeOrders(cwd, [ORDER_A, ORDER_UI]);
+
+  // read-only queries answer even while the capability is disabled
+  const impactOut = run(['standing-orders', 'impact', 'REFUND-AMOUNT-A', '--raw'], cwd, home);
+  const impact = lastJson(impactOut);
+  assert.equal(impact.subcommand, 'impact', impactOut);
+  assert.equal(impact.ok, true, impactOut);
+  assert.equal(impact.id, 'REFUND-AMOUNT-A');
+  assert.equal(impact.traced, false);
+  assert.equal(impact.status, 'untraced');
+  assert.deepEqual(impact.phases, []);
+  assert.match(impact.current_hash, /^sha256:[0-9a-f]{64}$/);
+
+  const staleOut = run(['standing-orders', 'stale', '--raw'], cwd, home);
+  const stale = lastJson(staleOut);
+  assert.equal(stale.subcommand, 'stale', staleOut);
+  assert.equal(stale.ok, true, staleOut);
+  assert.deepEqual(stale.stale, []);
+
+  // a usage error still reaches the router (exit 1) rather than being swallowed by the dispatcher
+  const bad = tryRun(['standing-orders', 'impact', '--raw'], cwd, home);
+  assert.equal(lastJson(bad.stdout).errors[0].code, 'usage', bad.stdout + bad.stderr);
 });
 
 // Request-shape contract (OQ3, AC3 end to end): what our enforcementRequest sends is what the real prover accepts.
