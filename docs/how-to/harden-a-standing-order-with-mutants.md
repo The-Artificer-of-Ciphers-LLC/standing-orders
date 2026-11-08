@@ -38,6 +38,8 @@ gsd-tools standing-orders mutants --run --order REFUND-IDEMPOTENT
 
 It runs the rule's check through GSD's prover, first on the normal fixtures, then once per mutant, and prints each outcome. It exits 1 when the rule is not proven or any mutant survived. The same runs happen automatically after every execution wave (`enforce`).
 
+Run it while you author the rule, not in the middle of a planned phase. `MUTANTS.json` is a protected file, so a manual run after the phase is planned changes it. The next wave then stops with `check_file_changed` until you re-run `gsd-tools standing-orders coverage --phase N`.
+
 ## 4. Fix a survivor
 
 | Outcome | Meaning | What to do |

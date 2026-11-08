@@ -24,7 +24,7 @@ The name comes from the military term: a standing order stays in force across ev
 ## Install
 
 ```bash
-gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.6.0
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.7.0
 gsd config-set standing-orders.enabled true
 ```
 
