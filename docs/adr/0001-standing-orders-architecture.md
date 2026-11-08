@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
-- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Amended again 2026-11-08 (phase 4, [#5](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/5)) — A7, the trace step commits its own ledger. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Amended again 2026-11-08 (phase 4, [#5](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/5)) — A7, the trace step commits its own ledger. Amended again 2026-11-08 (phase 5, [#6](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/6)) — A8, the LLM conflict pass moves to `discuss:post`, and promotion writes through a command. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -119,7 +119,8 @@ Because fragments are static, dynamic content moves through files: a **step** co
 
 | Point | Hook | Behaviour |
 | --- | --- | --- |
-| `discuss:post` | `step` (skill) | Offer to promote resolved phase prohibitions and project-wide CONTEXT.md decisions into `ORDERS.yaml`, one confirmation each. |
+| `discuss:post` | `step` (skill) | Offer to promote resolved phase prohibitions and project-wide CONTEXT.md decisions into `ORDERS.yaml`, one confirmation each. Writes through `standing-orders promote --add`, one order per call (A8). |
+| `discuss:post` | `gate` `agentVerdict` (non-blocking) | The LLM semantic-conflict pass (§5), at this point rather than `plan:pre` (A8). |
 | `plan:pre` | `step` → `standing-orders select <phase-dir>` | Writes `APPLICABLE.md` (applicable orders only, byte-capped, omitted count stated) and `CONFLICTS.json`. `produces` both. |
 | `plan:pre` | `contribution` into `planner` | Static fragment: read `APPLICABLE.md`; cite each order id in `must_haves`; never list a check target in `files_modified`. `consumes` `APPLICABLE.md`. |
 | `plan:pre` | `gate` `query: standing-orders conflicts` | Blocks on validation errors, deterministic conflicts, undefined contexts, and (per `block_on`) unlocatable `test`-tier checks. |
@@ -133,7 +134,7 @@ Because fragments are static, dynamic content moves through files: a **step** co
 Research (PRD §3) shows pure-LLM contradiction detection has low recall. So:
 
 - **Deterministic (`lib/conflicts.cjs`, pure):** overlapping-context variants with different outcomes; duplicate ids; prohibition versus required variant on one operation and context; undefined contexts; unlocatable check targets. These alone may block.
-- **LLM (phase 5, optional):** a skill that reads `APPLICABLE.md` plus the phase `SPEC.md` and proposes semantic conflicts. It follows ADR-550's recall-then-precision protocol: findings are confirmed by a human, dismissals need a reason, and `--auto` never dismisses. Its gate uses `agentVerdict`, which gsd-core forces to non-blocking.
+- **LLM (phase 5, optional):** a skill that reads `APPLICABLE.md` plus the phase `SPEC.md` and proposes semantic conflicts. It follows ADR-550's recall-then-precision protocol: findings are confirmed by a human, dismissals need a reason, and `--auto` never dismisses. Its gate uses `agentVerdict`, which gsd-core forces to non-blocking. It runs at `discuss:post`, because no `plan:*` workflow evaluates an `agentVerdict` gate (A8).
 
 ### 6. Independence of checks
 
@@ -306,6 +307,19 @@ Decision, confirmed by the maintainer on 2026-11-08:
 
 Known limit, stated: append-only is a convention enforced by this tool, not tamper evidence. The ledger is a tracked file, and its history is git's.
 
+## Amendments (2026-11-08, phase 5)
+
+**A8 — The LLM conflict pass runs at `discuss:post`; promotion and findings go through commands.** Read from gsd-core 1.19.0: no `plan:*` or `ship:*` workflow evaluates an `agentVerdict` gate. `plan-phase.md` dispatches gates by `query` or `predicate` and skips any other shape with a warning, and `ship.md` states that `agentVerdict` "has no runner at `ship:pre`". `plan:pre` also dispatches skill steps only when auto-chaining. A `plan:pre` `agentVerdict` gate, as §5 first described it, would validate and then never run. `discuss-phase.md` dispatches `discuss:post` through the generic `references/loop-hook-dispatch.md` contract, which dispatches every step (a `ref.skill` step through the Skill tool as `gsd-<stem>`) and evaluates every gate, `agentVerdict` included, treating `blocking: false` as advisory.
+
+Decision, confirmed by the maintainer on 2026-11-08:
+
+- The LLM pass is the skill `standing-orders-conflict-review`, named by a non-blocking `agentVerdict` gate at `discuss:post`. `APPLICABLE.md` is not yet written at that point, so the skill runs `standing-orders select` itself, then reads `APPLICABLE.md`, `CONFLICTS.json`, the phase `SPEC.md` and `CONTEXT.md`. It can also be run by hand with a phase number.
+- Its findings are recorded with `standing-orders semantic` in `<phase dir>/STANDING-ORDERS-SEMANTIC.json`, using ADR-550's lifecycle: `unresolved`, `resolved` (confirmed by a human), or `dismissed` (with a required non-empty reason). The command refuses a dismissal without a reason, and refuses any decision made with `--auto`: in auto mode findings can be proposed but stay `unresolved`. These rules are what CI tests; the quality of the LLM's recall and precision is not (ADR-550 D5).
+- A confirmed finding stays advisory, as §5 requires. It is fixed by editing `ORDERS.yaml`, after which the deterministic gate enforces it.
+- Promotion (`standing-orders-promote`, a `discuss:post` skill step) writes only through `standing-orders promote --add`, which adds exactly one order per call and refuses a list. "One confirmation each" is therefore a property of the command, not only of the skill's wording. The order is inserted into `ORDERS.yaml` as text, so comments and layout survive, and the result is re-parsed: if it does not parse, or any existing order's hash changed, nothing is written and the command returns the YAML to paste by hand. `promote --candidates` lists the phase's resolved `SPEC.md` prohibitions and `CONTEXT.md` decisions, and marks the ones already promoted by their `source`.
+
+Known limit, stated: how an orchestrator evaluates an `agentVerdict` gate is host prose, not code; gsd-core ships no deterministic runner for it.
+
 ## Alternatives considered
 
 | Alternative | Why rejected |
@@ -342,5 +356,5 @@ Each phase is one sub-issue and one PR, stacked on `main`; epic [#1](https://git
 | 2 | #3 | Manifest, `select`/`conflicts`/`coverage` subcommands, `plan:pre` select step, planner contribution, `plan:pre` and `plan:post` gates as step + `predicate`. | R5 (wiring), R6 (gate), R7, R9, R17, AC1, AC2, AC5 | Manifest passes gsd-core's validator; installs from a local path and from git; `standing-orders` family reachable through `gsd_run`. |
 | 3 | #4 | `enforce` step + `execute:wave:post` predicate gate via `check prohibition-enforcement`; check-file edit rule and projection rule extending `coverage`; planner projection of orders into `must_haves` (A6, replacing the `verify:pre` verifier contribution). | R10, R11, R12, AC3, AC4, AC8 | Request-shape contract test against gsd-core 1.19.0 and 1.20.1; RED fixture for a plan editing a check target; a `backstop` order projected as a `verification: backstop` truth, which gsd-verifier reports `insufficient_spec`. |
 | 4 | #5 | `trace` ship:pre step (commits its own ledger, A7), `impact`, `stale`; `select` warns on stale orders. | R13, R14, R15, AC6 | Append-only property test; hash stable under key reorder; `impact` and `stale` reachable through `gsd_run`. |
-| 5 | #6 | Promotion skill; LLM conflict skill (`agentVerdict`, non-blocking). | R8, R16 | Dismissal-needs-reason and `--auto`-never-dismisses tests. |
+| 5 | #6 | Promotion skill + `promote` command; LLM conflict skill as a non-blocking `agentVerdict` gate at `discuss:post` + `semantic` command (A8). | R8, R16 | Dismissal-needs-reason and `--auto`-never-dismisses tests; one order per `promote --add` call. |
 | 6 | #7 | Mutation hardening. | — | Separate ADR before any implementation. |

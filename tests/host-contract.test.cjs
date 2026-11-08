@@ -38,7 +38,7 @@ const ROADMAP = [
   '',
 ].join('\n');
 
-const BUNDLE_ITEMS = ['capability.json', 'standing-orders-router.cjs', 'lib', 'fragments', 'references', 'package.json', 'LICENSE', 'README.md'];
+const BUNDLE_ITEMS = ['capability.json', 'standing-orders-router.cjs', 'lib', 'fragments', 'references', 'skills', 'package.json', 'LICENSE', 'README.md'];
 
 const tempDirs = [];
 after(() => {
@@ -153,7 +153,8 @@ gated('manifestValidates', () => {
   assert.deepEqual(v.validateCapability(cap, 'standing-orders'), []);
   assert.deepEqual(v.validateAgainstContract(cap, 'standing-orders'), []);
   assert.deepEqual(v.materializeHookFragments(cap, dir), []);
-  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
+  assert.deepEqual(cap.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
+  assert.deepEqual(cap.skills, ['standing-orders-promote', 'standing-orders-conflict-review']);
   assert.deepEqual(cap.steps.filter((s) => s.point === 'ship:pre'), [
     { point: 'ship:pre', ref: { command: 'standing-orders trace' }, produces: ['.planning/standing-orders/TRACE.jsonl'], consumes: [], when: 'standing-orders.enabled', onError: 'skip' },
   ]);
@@ -390,6 +391,31 @@ gated('impactAndStaleViaGsdRun', () => {
   // a usage error still reaches the router (exit 1) rather than being swallowed by the dispatcher
   const bad = tryRun(['standing-orders', 'impact', '--raw'], cwd, home);
   assert.equal(lastJson(bad.stdout).errors[0].code, 'usage', bad.stdout + bad.stderr);
+});
+
+// Row 60 (#6): the discuss:post promote step and advisory agentVerdict gate render on the real host, only when enabled.
+gated('discussPostRenderContract', () => {
+  const bundle = makeBundle();
+  const on = makeProject({ 'standing-orders': { enabled: true } });
+  install(on, bundle);
+  const hooks = ours(JSON.parse(renderHooks(on, 'discuss:post')).activeHooks);
+  const steps = hooks.filter((h) => h.ref && h.ref.skill === 'standing-orders-promote');
+  assert.equal(steps.length, 1, JSON.stringify(hooks));
+  assert.equal(steps[0].capId, 'standing-orders');
+  const gates = hooks.filter((h) => h.check && h.check.agentVerdict && h.check.agentVerdict.ref === 'standing-orders-conflict-review');
+  assert.equal(gates.length, 1, JSON.stringify(hooks));
+  assert.equal(gates[0].blocking, false, 'the semantic review is advisory: it never blocks discussion');
+  assert.equal(hooks.filter((h) => h.check && h.check.predicate).length, 0, 'no deterministic gate at discuss:post');
+
+  // a disabled or absent capability renders exactly what a project without it renders (AC5)
+  for (const config of [{}, { 'standing-orders': { enabled: false } }]) {
+    const off = makeProject(config);
+    install(off, bundle);
+    const bare = { cwd: mkTemp(), home: mkTemp() };
+    fs.cpSync(path.join(off.cwd, '.planning'), path.join(bare.cwd, '.planning'), { recursive: true });
+    assert.equal(renderHooks(off, 'discuss:post'), renderHooks(bare, 'discuss:post'), `discuss:post differs (config ${JSON.stringify(config)})`);
+    assert.equal(ours(JSON.parse(renderHooks(off, 'discuss:post')).activeHooks).length, 0, JSON.stringify(config));
+  }
 });
 
 // Request-shape contract (OQ3, AC3 end to end): what our enforcementRequest sends is what the real prover accepts.

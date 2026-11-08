@@ -15,12 +15,14 @@
  *
  * Subcommands: `validate` (phase 1), the loop wiring `select`, `conflicts` and
  * `coverage` (phase 2), the execution gate `enforce` (phase 3) and the
- * traceability ledger `trace`, `impact` and `stale` (phase 4). The same verbs
- * are reachable directly:
+ * traceability ledger `trace`, `impact` and `stale` (phase 4), and the authoring
+ * commands `promote` and `semantic` (phase 5). The same verbs are reachable directly:
  *   node standing-orders-router.cjs validate [file] [--raw]
  *   node standing-orders-router.cjs select|conflicts|coverage|enforce|trace (--phase <n> | --phase-dir <dir>) [--req-ids <ids>] [--files <list>] [--raw]
  *   node standing-orders-router.cjs impact <order-id> [--raw]
  *   node standing-orders-router.cjs stale [--raw]
+ *   node standing-orders-router.cjs promote (--candidates (--phase <n> | --phase-dir <dir>) | --add <order-json>) [--raw]
+ *   node standing-orders-router.cjs semantic propose|resolve|list (--phase <n> | --phase-dir <dir>) [--findings <json>] [--id <S-n> --status <s> [--reason <text>]] [--auto] [--raw]
  * Exit codes (direct CLI only): 0 ok; 1 invalid, blocked, incomplete, stale or
  * usage error; 2 a file or directory could not be read or resolved.
  *
@@ -41,11 +43,25 @@ const { evaluateBlock, evaluateCoverage, evaluateEnforcement, renderVerdict, STA
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
 const { errMessage, unique, isPlainObject, compareStrings } = require('./lib/util.cjs');
 const { TRACE_PATH, MAX_TRACE_BYTES, isValidPhase, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
+const { MAX_PHASE_FILE_BYTES, PROMOTE_CODES, isSpecFileName, isContextFileName, buildCandidates, parseAddArgument, promoteOrder } = require('./lib/promote.cjs');
+const {
+  SEMANTIC_FILE,
+  MAX_SEMANTIC_BYTES,
+  FINDING_STATUSES,
+  SEMANTIC_CODES,
+  emptyDocument,
+  parseSemantic,
+  proposeFindings,
+  resolveFinding,
+  countFindings,
+  serializeSemantic,
+} = require('./lib/semantic.cjs');
 
 const FAMILY = 'standing-orders';
-const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
+const SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
 const LOOP_SUBCOMMANDS = Object.freeze(['select', 'conflicts', 'coverage', 'enforce', 'trace']);
 const QUERY_SUBCOMMANDS = Object.freeze(['impact', 'stale']);
+const AUTHORING_SUBCOMMANDS = Object.freeze(['promote', 'semantic']);
 /** Upper bound for the one `git log` call that names the code commit a trace belongs to. */
 const GIT_TIMEOUT_MS = 10000;
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
@@ -924,6 +940,351 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
   return result;
 }
 
+// ─── Authoring: promote, semantic ─────────────────────────────────────────────
+
+/** Print and return a refusal for promote/semantic: the failure as JSON under --raw, the message through `error`. */
+function authoringFailure({ subcommand, code, message, rawOut, io, error, extra = {} }) {
+  const result = { schema: REPORT_SCHEMA, subcommand, ok: false, errors: [{ code, message }], written: [], ...extra };
+  if (rawOut) io.log(JSON.stringify(result));
+  error(message);
+  return result;
+}
+
+function disabledResult({ subcommand, rawOut, io }) {
+  const result = { schema: REPORT_SCHEMA, subcommand, ok: true, disabled: true, message: DISABLED_MESSAGE, written: [] };
+  io.log(rawOut ? JSON.stringify(result) : DISABLED_MESSAGE);
+  return result;
+}
+
+/**
+ * Parse flags against an allowed set. A `valued` flag takes one value (never another known flag), a `bare` flag none.
+ * Returns { values, flags, adds } or { usage }. A repeated `--add` is counted (the caller refuses it as a batch).
+ */
+function parseAuthoringFlags(subcommand, rest, { valued, bare, usageText }) {
+  const known = new Set([...valued, ...bare, '--raw']);
+  const values = {};
+  const flags = new Set();
+  let adds = 0;
+  const usage = (m) => ({ usage: `${FAMILY} ${subcommand}: ${m}. ${usageText}` });
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (typeof a !== 'string' || !a.startsWith('-')) return usage(`unexpected argument ${JSON.stringify(a)}`);
+    if (a === '--raw' || bare.includes(a)) {
+      flags.add(a);
+      continue;
+    }
+    if (!valued.includes(a)) return usage(`unknown flag ${JSON.stringify(a)}`);
+    const value = rest[i + 1];
+    if (typeof value !== 'string' || known.has(value)) return usage(`flag ${a} needs a value`);
+    i += 1;
+    if (a === '--add') adds += 1;
+    else if (Object.prototype.hasOwnProperty.call(values, a)) return usage(`flag ${a} was given twice`);
+    values[a] = value;
+  }
+  return { values, flags, adds };
+}
+
+/** ORDERS.yaml text for `promote --add`: { text } (null when missing) or { failure }. */
+function readOrdersForWrite({ root, io }) {
+  const rel = toSlashes(DEFAULT_ORDERS_PATH);
+  const abs = path.resolve(root, DEFAULT_ORDERS_PATH);
+  const fail = (code, message) => ({ failure: { code, message } });
+  try {
+    if (!io.exists(abs)) {
+      if (io.isSymlink(abs)) return fail(ERROR_CODES.FILE_UNREADABLE, `${rel} is a dangling link`);
+      return { text: null };
+    }
+    const realFile = io.realpath(abs);
+    if (!isInside(io.realpath(root), realFile)) return fail(ERROR_CODES.PATH_OUTSIDE_CWD, `${rel} resolves (through a link) outside the project root`);
+    const size = io.statSize(realFile);
+    if (typeof size !== 'number' || !Number.isFinite(size)) return fail(ERROR_CODES.FILE_UNREADABLE, `${rel} has no readable size`);
+    if (size > MAX_FILE_BYTES) return fail(ERROR_CODES.FILE_TOO_LARGE, `${rel} is ${size} bytes; the limit is ${MAX_FILE_BYTES}`);
+    return { text: String(io.readFile(abs)) };
+  } catch (e) {
+    return fail(ERROR_CODES.FILE_UNREADABLE, `${rel} could not be read: ${errMessage(e)}`);
+  }
+}
+
+/** The phase directory for promote/semantic: { phaseDir, phaseRel } or { failure } (an already reported result). */
+function locatePhase({ subcommand, values, root, rawOut, io, error }) {
+  const options = { phase: values['--phase'] === undefined ? null : values['--phase'], phaseDir: values['--phase-dir'] === undefined ? null : values['--phase-dir'] };
+  const fail = (code, message) => authoringFailure({ subcommand, code, message, rawOut, io, error });
+  const phase = resolvePhaseDir({ options, root, io });
+  if (!phase.ok) return { failure: fail(phase.code, phase.message) };
+  const bad = containPhaseDir(root, phase.phaseDir, io);
+  if (bad !== null) return { failure: fail(bad.code, bad.message) };
+  return { phaseDir: phase.phaseDir, phaseRel: toSlashes(path.relative(root, phase.phaseDir)) };
+}
+
+/** Read the SPEC and CONTEXT files of a phase directory; a file that cannot be used is skipped with a warning. */
+function readPhaseFiles({ root, phaseDir, io, warnings }) {
+  let names;
+  try {
+    names = io.listDir(phaseDir).map(String).filter((n) => isSpecFileName(n) || isContextFileName(n)).sort(compareStrings);
+  } catch (e) {
+    return { failure: { code: LOOP_CODES.PHASE_DIR_NOT_FOUND, message: `phase directory could not be listed: ${errMessage(e)}` } };
+  }
+  const files = [];
+  for (const name of names) {
+    const abs = path.join(phaseDir, name);
+    const label = toSlashes(path.relative(root, abs));
+    const skip = (why) => warnings.push({ code: PROMOTE_CODES.PHASE_FILE_SKIPPED, message: `${label} was skipped: ${why}` });
+    try {
+      if (!io.isFile(abs)) continue;
+      const realFile = io.realpath(abs);
+      if (!isInside(io.realpath(root), realFile)) {
+        skip('it resolves (through a link) outside the project root');
+        continue;
+      }
+      const size = io.statSize(realFile);
+      if (typeof size !== 'number' || !(size <= MAX_PHASE_FILE_BYTES)) {
+        skip(`it is larger than ${MAX_PHASE_FILE_BYTES} bytes`);
+        continue;
+      }
+      files.push({ name, label, text: String(io.readFile(abs)) });
+    } catch (e) {
+      skip(`it could not be read: ${errMessage(e)}`);
+    }
+  }
+  return { files };
+}
+
+function warningLines(warnings) {
+  return warnings.map((w) => `  warning ${w.code}: ${w.message}`);
+}
+
+function humanCandidateLines(result) {
+  if (result.candidates.length === 0) {
+    return [`standing-orders promote: no candidates found (looked for ${result.looked_for.join(', ')} in ${result.phase_dir})`, ...warningLines(result.warnings)];
+  }
+  const lines = result.candidates.map((c, i) => `${i + 1}. [${c.origin}] ${c.statement} (${c.source})${c.promoted_as ? ` - already promoted as ${c.promoted_as}` : ''}`);
+  if (result.truncated) lines.push('  (list truncated)');
+  return [...lines, ...warningLines(result.warnings)];
+}
+
+/** `promote --candidates`: read-only, not gated on `enabled`. */
+function runPromoteCandidates({ values, root, rawOut, io, error }) {
+  const located = locatePhase({ subcommand: 'promote', values, root, rawOut, io, error });
+  if (located.failure !== undefined) return located.failure;
+  const warnings = [];
+  const read = readPhaseFiles({ root, phaseDir: located.phaseDir, io, warnings });
+  if (read.failure !== undefined) return authoringFailure({ subcommand: 'promote', code: read.failure.code, message: read.failure.message, rawOut, io, error });
+  const loaded = loadOrders({ cwd: root, fileArg: DEFAULT_ORDERS_PATH, deps: io });
+  let document = loaded.document;
+  if (loaded.stage === 'file' && loaded.report.errors[0] && loaded.report.errors[0].code === ERROR_CODES.FILE_NOT_FOUND) document = { orders: [] };
+  else if (loaded.stage !== 'ok') {
+    warnings.push({ code: PROMOTE_CODES.ORDERS_UNUSABLE, message: 'ORDERS.yaml could not be used, so already-promoted candidates are not marked; run standing-orders validate' });
+  }
+  const built = buildCandidates({ files: read.files, document });
+  const result = {
+    schema: REPORT_SCHEMA,
+    subcommand: 'promote',
+    ok: true,
+    disabled: false,
+    mode: 'candidates',
+    phase_dir: located.phaseRel,
+    candidates: built.candidates,
+    truncated: built.truncated,
+    looked_for: ['*-SPEC.md', '*-CONTEXT.md'],
+    warnings,
+    written: [],
+  };
+  if (rawOut) io.log(JSON.stringify(result));
+  else for (const l of humanCandidateLines(result)) io.log(l);
+  return result;
+}
+
+/** `promote --add`: gated on `enabled`; adds exactly one order by text insertion and writes atomically. */
+function runPromoteAdd({ json, root, rawOut, io, error }) {
+  const fail = (code, message, extra) => authoringFailure({ subcommand: 'promote', code, message, rawOut, io, error, extra });
+  const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
+  if (!config.enabled) return disabledResult({ subcommand: 'promote', rawOut, io });
+  const parsed = parseAddArgument(json);
+  if (!parsed.ok) return fail(parsed.code, parsed.message);
+
+  const current = readOrdersForWrite({ root, io });
+  if (current.failure !== undefined) return fail(current.failure.code, current.failure.message);
+  const promoted = promoteOrder({ text: current.text, order: parsed.order, maxBytes: MAX_FILE_BYTES });
+  if (!promoted.ok) {
+    const extra = {};
+    if (promoted.paste !== undefined) extra.paste = promoted.paste;
+    if (promoted.errors !== undefined) extra.details = promoted.errors;
+    return fail(promoted.code, promoted.message, extra);
+  }
+  const unusable = prepareOutputDir({ subcommand: 'promote', root, io });
+  if (unusable !== null) return fail(unusable.code, unusable.message);
+  try {
+    writeAtomic(io, path.resolve(root, DEFAULT_ORDERS_PATH), promoted.text, 0);
+  } catch (e) {
+    return fail(LOOP_CODES.WRITE_FAILED, `promote: could not write ${toSlashes(DEFAULT_ORDERS_PATH)}: ${errMessage(e)}`);
+  }
+  const result = { schema: REPORT_SCHEMA, subcommand: 'promote', ok: true, disabled: false, mode: 'add', added: promoted.id, written: [DEFAULT_ORDERS_PATH] };
+  io.log(rawOut ? JSON.stringify(result) : `standing-orders promote: added ${promoted.id} to ${toSlashes(DEFAULT_ORDERS_PATH)}; run standing-orders validate`);
+  return result;
+}
+
+function runPromoteCommand({ rest, cwd, raw, error, io }) {
+  const usageText =
+    'Usage: standing-orders promote --candidates (--phase <n> | --phase-dir <dir>) [--raw] | standing-orders promote --add <order-json> [--raw]';
+  const rawOut = raw === true || rest.includes('--raw');
+  const usage = (message) => authoringFailure({ subcommand: 'promote', code: LOOP_CODES.USAGE, message, rawOut, io, error });
+  const parsed = parseAuthoringFlags('promote', rest, { valued: ['--add', '--phase', '--phase-dir', '--ws'], bare: ['--candidates'], usageText });
+  if (parsed.usage !== undefined) return usage(parsed.usage);
+  const { values, flags, adds } = parsed;
+  const candidates = flags.has('--candidates');
+  if (candidates === (adds > 0)) return usage(`${FAMILY} promote: give exactly one of --candidates and --add. ${usageText}`);
+  const root = path.resolve(cwd);
+  if (adds > 0) {
+    if (values['--phase'] !== undefined || values['--phase-dir'] !== undefined) {
+      return usage(`${FAMILY} promote: --add takes no phase flags. ${usageText}`);
+    }
+    if (adds > 1) {
+      return authoringFailure({ subcommand: 'promote', code: PROMOTE_CODES.BATCH_REFUSED, message: 'promote adds exactly one order per call; --add was given more than once', rawOut, io, error });
+    }
+    return runPromoteAdd({ json: values['--add'], root, rawOut, io, error });
+  }
+  if ((values['--phase'] === undefined) === (values['--phase-dir'] === undefined)) {
+    return usage(`${FAMILY} promote: give exactly one of --phase and --phase-dir. ${usageText}`);
+  }
+  return runPromoteCandidates({ values, root, rawOut, io, error });
+}
+
+/** Read the semantic ledger of a phase: { document } or { failure: { code, message } }. A missing file is an empty ledger. */
+function readSemantic({ root, abs, phaseRel, io }) {
+  const rel = toSlashes(path.relative(root, abs));
+  const fail = (message) => ({ failure: { code: SEMANTIC_CODES.SEMANTIC_UNUSABLE, message } });
+  try {
+    if (io.isSymlink(abs)) return fail(`${rel} is a symbolic link; the semantic file must be a regular file`);
+    if (!io.exists(abs)) return { document: emptyDocument(phaseRel) };
+    const size = io.statSize(abs);
+    if (typeof size !== 'number' || !Number.isFinite(size)) return fail(`${rel} has no readable size`);
+    if (size > MAX_SEMANTIC_BYTES) return fail(`${rel} is ${size} bytes; the limit is ${MAX_SEMANTIC_BYTES}`);
+    const parsed = parseSemantic(String(io.readFile(abs)));
+    if (!parsed.ok) return fail(`${rel} is not usable and was left as it is: ${parsed.message}`);
+    return { document: parsed.document };
+  } catch (e) {
+    return fail(`${rel} could not be read: ${errMessage(e)}`);
+  }
+}
+
+function humanSemanticLines(result) {
+  const c = result.counts;
+  const tally = `${c.unresolved} unresolved, ${c.resolved} confirmed, ${c.dismissed} dismissed`;
+  if (result.action === 'propose') {
+    const added = result.added.length > 0 ? ` (${result.added.join(', ')})` : '';
+    return [`standing-orders semantic propose: ${result.added.length} added${added}, ${result.duplicates.length} duplicate(s); ${tally}`];
+  }
+  if (result.action === 'resolve') return [`standing-orders semantic resolve: ${result.finding.id} is now ${result.finding.status}; ${tally}`];
+  const lines = [`standing-orders semantic list: ${result.findings.length} finding(s); ${tally}`];
+  for (const f of result.findings) lines.push(`  ${f.id} [${f.status}] ${f.orders.join(', ')}: ${f.statement}${f.reason ? ` (${f.reason})` : ''}`);
+  return lines;
+}
+
+const SEMANTIC_USAGE =
+  'Usage: standing-orders semantic propose (--phase <n> | --phase-dir <dir>) --findings <json> [--auto] [--raw] | semantic resolve (--phase <n> | --phase-dir <dir>) --id <S-n> --status <unresolved|resolved|dismissed> [--reason <text>] [--auto] [--raw] | semantic list (--phase <n> | --phase-dir <dir>) [--raw]';
+
+/** Parse a `semantic` command line into { action, values, flags, proposals } or { usage }. */
+function parseSemanticArgs(rest) {
+  const action = rest[0];
+  if (action !== 'propose' && action !== 'resolve' && action !== 'list') {
+    return { usage: `${FAMILY} semantic: give an action (propose, resolve or list). ${SEMANTIC_USAGE}` };
+  }
+  const common = ['--phase', '--phase-dir', '--ws'];
+  const spec = {
+    propose: { valued: [...common, '--findings'], bare: ['--auto'] },
+    resolve: { valued: [...common, '--id', '--status', '--reason'], bare: ['--auto'] },
+    list: { valued: common, bare: [] },
+  }[action];
+  const parsed = parseAuthoringFlags(`semantic ${action}`, rest.slice(1), { ...spec, usageText: SEMANTIC_USAGE });
+  if (parsed.usage !== undefined) return { usage: parsed.usage };
+  const { values, flags } = parsed;
+  const usage = (m) => ({ usage: `${FAMILY} semantic ${action}: ${m}. ${SEMANTIC_USAGE}` });
+  if ((values['--phase'] === undefined) === (values['--phase-dir'] === undefined)) return usage('give exactly one of --phase and --phase-dir');
+  let proposals = null;
+  if (action === 'propose') {
+    if (values['--findings'] === undefined) return usage('--findings is required');
+    try {
+      proposals = JSON.parse(values['--findings']);
+    } catch (e) {
+      return usage(`--findings is not valid JSON: ${errMessage(e)}`);
+    }
+    if (!Array.isArray(proposals)) return usage('--findings must be a JSON list');
+  }
+  if (action === 'resolve') {
+    if (values['--id'] === undefined || values['--status'] === undefined) return usage('--id and --status are required');
+    if (!FINDING_STATUSES.includes(values['--status'])) return usage(`--status must be one of ${FINDING_STATUSES.join(', ')}`);
+  }
+  return { action, values, flags, proposals };
+}
+
+/** The order ids of ORDERS.yaml as a Set, or a failure message when the file cannot be used. */
+function knownOrderIds({ root, io }) {
+  const loaded = loadOrders({ cwd: root, fileArg: DEFAULT_ORDERS_PATH, deps: io });
+  if (loaded.stage !== 'ok') {
+    const first = loaded.report.errors[0];
+    return { failure: `ORDERS.yaml could not be used${first ? ` (${first.code})` : ''}; run standing-orders validate` };
+  }
+  return { ids: new Set(loaded.document.orders.map((o) => o.id)) };
+}
+
+/** `semantic propose|resolve|list`: the LLM conflict ledger. propose and resolve are gated on `enabled`; list is not. */
+function runSemanticCommand({ rest, cwd, raw, error, io }) {
+  const rawOut = raw === true || rest.includes('--raw');
+  const parsed = parseSemanticArgs(rest);
+  if (parsed.usage !== undefined) return authoringFailure({ subcommand: 'semantic', code: LOOP_CODES.USAGE, message: parsed.usage, rawOut, io, error });
+  const { action, values, flags, proposals } = parsed;
+  const fail = (code, message) => authoringFailure({ subcommand: 'semantic', code, message, rawOut, io, error });
+
+  const root = path.resolve(cwd);
+  if (action !== 'list') {
+    const config = readCapabilityConfig({ cwd: root, env: io.env, readFile: io.readFile, statSize: io.statSize });
+    if (!config.enabled) return disabledResult({ subcommand: 'semantic', rawOut, io });
+  }
+  const located = locatePhase({ subcommand: 'semantic', values, root, rawOut, io, error });
+  if (located.failure !== undefined) return located.failure;
+
+  let known = null;
+  if (action === 'propose') {
+    known = knownOrderIds({ root, io });
+    if (known.failure !== undefined) return fail(LOOP_CODES.ORDERS_UNUSABLE, known.failure);
+  }
+  const target = path.join(located.phaseDir, SEMANTIC_FILE);
+  const current = readSemantic({ root, abs: target, phaseRel: located.phaseRel, io });
+  if (current.failure !== undefined) return fail(current.failure.code, current.failure.message);
+
+  const written = [];
+  let result;
+  if (action === 'list') {
+    result = { schema: REPORT_SCHEMA, subcommand: 'semantic', ok: true, disabled: false, action, findings: current.document.findings, counts: countFindings(current.document), written };
+  } else {
+    const auto = flags.has('--auto');
+    const ts = new Date(io.now()).toISOString();
+    const outcome =
+      action === 'propose'
+        ? proposeFindings({ document: current.document, proposals, knownIds: known.ids, auto, ts })
+        : resolveFinding({ document: current.document, id: values['--id'], status: values['--status'], reason: values['--reason'], auto, ts });
+    if (!outcome.ok) return fail(outcome.code === 'usage' ? LOOP_CODES.USAGE : outcome.code, outcome.message);
+    if (action === 'resolve' || outcome.added.length > 0) {
+      const text = serializeSemantic(outcome.document);
+      if (Buffer.byteLength(text, 'utf8') > MAX_SEMANTIC_BYTES) return fail(SEMANTIC_CODES.INVALID_FINDING, `the semantic file would exceed ${MAX_SEMANTIC_BYTES} bytes`);
+      try {
+        writeAtomic(io, target, text, 0);
+      } catch (e) {
+        return fail(LOOP_CODES.WRITE_FAILED, `semantic ${action}: could not write ${SEMANTIC_FILE}: ${errMessage(e)}`);
+      }
+      written.push(toSlashes(path.relative(root, target)));
+    }
+    result = { schema: REPORT_SCHEMA, subcommand: 'semantic', ok: true, disabled: false, action, counts: countFindings(outcome.document), written };
+    if (action === 'propose') {
+      result.added = outcome.added;
+      result.duplicates = outcome.duplicates;
+    } else result.finding = outcome.finding;
+  }
+  if (rawOut) io.log(JSON.stringify(result));
+  else for (const l of humanSemanticLines(result)) io.log(l);
+  return result;
+}
+
 function humanLines(report) {
   const verdict = report.ok ? 'OK' : 'INVALID';
   const s = report.summary;
@@ -943,8 +1304,11 @@ function humanLines(report) {
 function routeStandingOrdersCommand({ args = [], cwd = process.cwd(), raw = false, error = () => {}, deps = {} }) {
   const io = { ...defaultDeps(), ...deps };
   const subcommand = args[1];
-  if (LOOP_SUBCOMMANDS.includes(subcommand) || QUERY_SUBCOMMANDS.includes(subcommand)) {
-    const run = LOOP_SUBCOMMANDS.includes(subcommand) ? runLoopCommand : runQueryCommand;
+  if (LOOP_SUBCOMMANDS.includes(subcommand) || QUERY_SUBCOMMANDS.includes(subcommand) || AUTHORING_SUBCOMMANDS.includes(subcommand)) {
+    let run = runQueryCommand;
+    if (LOOP_SUBCOMMANDS.includes(subcommand)) run = runLoopCommand;
+    else if (subcommand === 'promote') run = runPromoteCommand;
+    else if (subcommand === 'semantic') run = runSemanticCommand;
     try {
       return run({ subcommand, rest: args.slice(2), cwd, raw, error, io });
     } catch (e) {
@@ -987,6 +1351,10 @@ function isUsageFailure(report) {
 
 /** Exit code for the direct CLI: 0 ok; 2 the file could not be read; 1 otherwise (`stale`: 1 when any order is stale). */
 function exitCodeFor(report) {
+  if (AUTHORING_SUBCOMMANDS.includes(report.subcommand)) {
+    if (report.ok) return 0;
+    return Array.isArray(report.errors) && report.errors.some((e) => FILE_ERROR_CODES.has(e.code)) ? 2 : 1;
+  }
   if (QUERY_SUBCOMMANDS.includes(report.subcommand)) {
     if (report.ok === false) return isUsageFailure(report) ? 1 : 2;
     return report.subcommand === 'stale' && Array.isArray(report.stale) && report.stale.length > 0 ? 1 : 0;

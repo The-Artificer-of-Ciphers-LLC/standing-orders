@@ -63,7 +63,7 @@ const noWrites = (m) => {
 
 describe('router loop subcommands', () => {
   it('exportsTheSubcommandTable', () => {
-    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate']);
+    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic']);
     assert.equal(APPLICABLE_PATH, '.planning/standing-orders/APPLICABLE.md');
     assert.equal(CONFLICTS_PATH, '.planning/standing-orders/CONFLICTS.json');
     assert.equal(ENFORCEMENT_PATH, '.planning/standing-orders/ENFORCEMENT.json');

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "standing-orders",
   "role": "feature",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "title": "Standing Orders",
   "description": "Project-wide, context-scoped business rules: conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
   "tier": "full",
@@ -13,7 +13,7 @@
   "homepage": "https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders",
   "repository": "https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders",
   "license": "MIT",
-  "skills": [],
+  "skills": ["standing-orders-promote", "standing-orders-conflict-review"],
   "agents": [],
   "hooks": [],
   "activationKey": "standing-orders.enabled",
@@ -27,10 +27,18 @@
       "family": "standing-orders",
       "module": "standing-orders-router.cjs",
       "router": "routeStandingOrdersCommand",
-      "subcommands": ["select", "conflicts", "coverage", "enforce", "trace", "impact", "stale", "validate"]
+      "subcommands": ["select", "conflicts", "coverage", "enforce", "trace", "impact", "stale", "validate", "promote", "semantic"]
     }
   ],
   "steps": [
+    {
+      "point": "discuss:post",
+      "ref": { "skill": "standing-orders-promote" },
+      "produces": [".planning/standing-orders/ORDERS.yaml"],
+      "consumes": [],
+      "when": "standing-orders.enabled",
+      "onError": "skip"
+    },
     {
       "point": "plan:pre",
       "ref": { "command": "standing-orders select" },
@@ -76,6 +84,13 @@
     }
   ],
   "gates": [
+    {
+      "point": "discuss:post",
+      "check": { "agentVerdict": { "ref": "standing-orders-conflict-review", "prompt": "Run the gsd-standing-orders-conflict-review skill for this phase. It proposes semantic conflicts between the applicable standing orders and the phase SPEC.md, asks the user to confirm or dismiss each one (a dismissal needs a reason; auto mode never dismisses), and ends with an advisory verdict line. This gate is advisory: report the verdict and never block." } },
+      "when": "standing-orders.enabled",
+      "blocking": false,
+      "onError": "skip"
+    },
     {
       "point": "plan:pre",
       "check": { "predicate": { "kind": "artifact-frontmatter-equals", "artifact": "STANDING-ORDERS.md", "field": "conflicts", "equals": "clear" } },
