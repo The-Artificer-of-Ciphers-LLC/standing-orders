@@ -33,8 +33,10 @@ const CONFLICT_ORDERS = doc({
 
 const CONTEXT_MD = 'The refund change touches `src/billing/refund.js`.\n';
 
-function planText({ files = [], truths = [] }) {
-  const data = { requirements: ['X-1'], must_haves: { truths } };
+function planText({ files = [], truths = [], prohibitions }) {
+  const mustHaves = { truths };
+  if (prohibitions !== undefined) mustHaves.prohibitions = prohibitions;
+  const data = { requirements: ['X-1'], must_haves: mustHaves };
   if (files.length > 0) data.files_modified = files;
   return '---\n' + yamlOf(data) + '---\nbody\n';
 }
@@ -61,9 +63,10 @@ const noWrites = (m) => {
 
 describe('router loop subcommands', () => {
   it('exportsTheSubcommandTable', () => {
-    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'validate']);
+    assert.deepEqual([...SUBCOMMANDS], ['select', 'conflicts', 'coverage', 'enforce', 'validate']);
     assert.equal(APPLICABLE_PATH, '.planning/standing-orders/APPLICABLE.md');
     assert.equal(CONFLICTS_PATH, '.planning/standing-orders/CONFLICTS.json');
+    assert.equal(ENFORCEMENT_PATH, '.planning/standing-orders/ENFORCEMENT.json');
   });
 
   // AC5: disabled means no writes and nothing read but the config files.
@@ -183,7 +186,7 @@ describe('router loop subcommands', () => {
       [],
       ['--phase-dir', PHASE, '--files'],
     ];
-    for (const sub of ['select', 'conflicts', 'coverage']) {
+    for (const sub of ['select', 'conflicts', 'coverage', 'enforce']) {
       for (const extra of cases) {
         const m = setup();
         const r = run(m, sub, extra);
@@ -217,7 +220,7 @@ describe('router loop subcommands', () => {
   });
 
   it('coverageWritesVerdict', () => {
-    const complete = setup({ files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: ['BILL-RULE holds'] }) } });
+    const complete = setup({ files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: [{ statement: 'BILL-RULE: holds', verification: 'backstop' }] }) } });
     const r1 = run(complete, 'coverage');
     assert.equal(r1.ok, true);
     assert.equal(r1.coverage, 'complete');
@@ -240,7 +243,7 @@ describe('router loop subcommands', () => {
 
     const conflicted = setup({
       orders: CONFLICT_ORDERS,
-      files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: ['REF-A holds', 'REF-B holds'] }) },
+      files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: [{ statement: 'REF-A: full', verification: 'backstop' }, { statement: 'REF-B: prorated', verification: 'backstop' }] }) },
     });
     const r3 = run(conflicted, 'coverage');
     assert.equal(r3.coverage, 'complete');
@@ -394,7 +397,7 @@ describe('router loop subcommands', () => {
     assert.equal(mkdirFails.calls.error.length, 1);
 
     const coverageFails = setup({
-      files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: ['BILL-RULE holds'] }) },
+      files: { [`${PHASE}/03-01-PLAN.md`]: planText({ truths: [{ statement: 'BILL-RULE: holds', verification: 'backstop' }] }) },
       overrides: {
         writeFile: () => {
           throw new Error('EROFS');
@@ -477,5 +480,406 @@ describe('router loop subcommands', () => {
     const missing = setup({ orders: null });
     run(missing, 'select');
     assert.equal(missing.read(APPLICABLE_PATH), header + footer);
+  });
+});
+
+const { ENFORCEMENT_PATH } = require('../standing-orders-router.cjs');
+const { ENFORCE_TIMEOUT_MS } = require('../lib/host.cjs');
+const { testOrder } = require('./helpers/fixtures.cjs');
+
+const HOST_CLI = '/opt/gsd/bin/gsd-tools.cjs';
+const GREEN = JSON.stringify({ status: 'green', flagged: false, tier: 'test', reason: 'ok', located: true, kind: 'node-test', evidence: [] });
+const FLAGGED = JSON.stringify({
+  status: 'unverified',
+  flagged: true,
+  tier: 'test',
+  reason: 'test-tier prohibition has no passing wired enforcement check',
+  located: true,
+  kind: 'node-test',
+  evidence: [],
+});
+
+const T_A = testOrder({ id: 'T-A', statement: 'Never A.', scope: SCOPE_BILLING, check_target: 'tests/a.test.cjs' });
+const T_B = testOrder({ id: 'T-B', statement: 'Never B.', scope: SCOPE_BILLING, check_target: 'tests/b.test.cjs' });
+const ENFORCE_ORDERS = doc({ orders: [T_B, T_A] });
+const PLAN = `${PHASE}/03-01-PLAN.md`;
+
+const testProjection = (id, target) => ({ statement: `${id}: rule`, status: 'resolved', verification: 'test', check_kind: 'node-test', check_target: target });
+const bsProjection = (id) => ({ statement: `${id}: rule`, verification: 'backstop' });
+const PLAN_AB = planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs'), testProjection('T-B', 'tests/b.test.cjs')] });
+
+/**
+ * Router project wired to a host CLI that exists in the in-memory filesystem.
+ * `verdicts` maps an order id to the canned host stdout (or an Error to throw).
+ * `snapshots` records the verdict file as it stood at each host call.
+ */
+function setupEnforce({ orders = ENFORCE_ORDERS, plan = PLAN_AB, verdicts = {}, overrides = {}, config, links, extraFiles = {} } = {}) {
+  const execCalls = [];
+  const snapshots = [];
+  let m = null;
+  const execFile = (file, args, opts) => {
+    const id = JSON.parse(args[4]).prohibition.id;
+    execCalls.push({ file, args, opts, id });
+    snapshots.push(m.read(VERDICT));
+    const out = verdicts[id];
+    if (out instanceof Error) throw out;
+    return out === undefined ? GREEN : out;
+  };
+  const files = { [HOST_CLI]: '// host stub\n', ...extraFiles };
+  if (plan !== null) files[PLAN] = plan;
+  const opts = { orders, files, overrides: { execFile, argv: ['node', HOST_CLI], ...overrides } };
+  if (config !== undefined) opts.config = config;
+  if (links !== undefined) opts.links = links;
+  m = setup(opts);
+  return { m, execCalls, snapshots };
+}
+
+const lineSet = (m, rel) => new Set(m.read(rel).split('\n'));
+
+describe('router enforce subcommand', () => {
+  it('enforceDisabledWritesNothing', () => {
+    for (const config of [null, JSON.stringify({ 'standing-orders': { enabled: false } })]) {
+      const { m, execCalls } = setupEnforce({ config });
+      const r = run(m, 'enforce');
+      assert.equal(r.ok, true);
+      assert.equal(r.disabled, true);
+      assert.equal(r.subcommand, 'enforce');
+      assert.equal(r.message, 'standing-orders is not enabled; set standing-orders.enabled to true');
+      assert.deepEqual(r.written, []);
+      noWrites(m);
+      for (const p of m.calls.readFile) assert.ok(p.endsWith('config.json'), p);
+      assert.equal(execCalls.length, 0);
+      assert.equal(exitCodeFor(r), 0);
+    }
+  });
+
+  it('enforceMissingOrdersClear', () => {
+    const { m, execCalls } = setupEnforce({ orders: null, plan: null });
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.enforcement, 'clear');
+    assert.ok(r.warnings.some((w) => w.code === 'orders_file_missing'));
+    assert.equal(execCalls.length, 0);
+    assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
+    assert.ok(lineSet(m, VERDICT).has('generated_by: enforce'));
+    const report = JSON.parse(m.read(ENFORCEMENT_PATH));
+    assert.deepEqual(report, { schema: 1, phase: PHASE, status: 'clear', results: [] });
+    assert.equal(exitCodeFor(r), 0);
+  });
+
+  it('enforceInvalidOrdersError', () => {
+    const invalid = setupEnforce({ orders: 'version: 1\norders: not-a-list\n', plan: null });
+    const r = run(invalid.m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.enforcement, 'error');
+    assert.ok(r.reasons.some((x) => x.code === 'orders_invalid'));
+    assert.equal(invalid.execCalls.length, 0);
+    assert.ok(lineSet(invalid.m, VERDICT).has('enforcement: error'));
+    assert.equal(JSON.parse(invalid.m.read(ENFORCEMENT_PATH)).status, 'error');
+    assert.equal(exitCodeFor(r), 1);
+
+    const unreadable = setupEnforce({ plan: null, links: { [ORDERS]: '/etc/outside' } });
+    const u = run(unreadable.m, 'enforce');
+    assert.equal(u.enforcement, 'error');
+    assert.ok(u.reasons.some((x) => x.code === 'orders_unreadable'));
+    assert.equal(unreadable.execCalls.length, 0);
+    assert.equal(exitCodeFor(u), 1);
+  });
+
+  it('enforceBackstopOnlyClear', () => {
+    const plan = planText({ truths: [{ statement: 'BILL-RULE: holds', verification: 'backstop' }] });
+    const { m, execCalls } = setupEnforce({ orders: AC1_ORDERS, plan });
+    const r = run(m, 'enforce');
+    assert.deepEqual(r.applicable, ['BILL-RULE']);
+    assert.equal(r.enforcement, 'clear');
+    assert.equal(execCalls.length, 0, 'a backstop order has nothing to prove mechanically');
+    assert.deepEqual(r.results, []);
+    assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
+    assert.equal(exitCodeFor(r), 0);
+  });
+
+  it('enforceAllGreenIsClear', () => {
+    const { m, execCalls } = setupEnforce();
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.subcommand, 'enforce');
+    assert.equal(r.enforcement, 'clear');
+    assert.equal(r.conflicts, 'clear');
+    assert.equal(r.coverage, 'complete');
+    assert.deepEqual(execCalls.map((c) => c.id), ['T-A', 'T-B']);
+    const call = execCalls[0];
+    assert.equal(call.file, '/usr/bin/node');
+    assert.equal(call.args.length, 5);
+    assert.deepEqual(call.args.slice(0, 4), [HOST_CLI, 'check', 'prohibition-enforcement', '--json']);
+    assert.deepEqual(JSON.parse(call.args[4]), {
+      prohibition: { id: 'T-A', statement: 'Never A.', status: 'resolved', verification: 'test' },
+      check: { kind: 'node-test', target: 'tests/a.test.cjs', violationFixture: 'tests/fixtures/bad.js', cleanFixture: 'tests/fixtures/good.js' },
+    });
+    assert.equal(call.opts.cwd, m.cwd, 'the host runs in the project root');
+    assert.equal(call.opts.timeout, ENFORCE_TIMEOUT_MS);
+    assert.ok(!call.opts.shell);
+    assert.deepEqual(JSON.parse(m.read(ENFORCEMENT_PATH)).results.map((x) => [x.id, x.status, x.flagged]), [
+      ['T-A', 'green', false],
+      ['T-B', 'green', false],
+    ]);
+    assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
+    assert.equal(exitCodeFor(r), 0);
+  });
+
+  // AC3: a check that does not go red on its violation fixture is flagged, never green.
+  it('enforceReportsFlaggedNeverGreen', () => {
+    const { m } = setupEnforce({ orders: doc({ orders: [T_A] }), plan: planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] }), verdicts: { 'T-A': FLAGGED } });
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.enforcement, 'flagged');
+    const verdict = lineSet(m, VERDICT);
+    assert.ok(verdict.has('enforcement: flagged'));
+    assert.ok(!verdict.has('enforcement: clear'));
+    assert.ok(m.read(VERDICT).includes('enforcement_flagged: T-A: test-tier prohibition has no passing wired enforcement check'));
+    const report = JSON.parse(m.read(ENFORCEMENT_PATH));
+    assert.equal(report.schema, 1);
+    assert.equal(report.phase, PHASE);
+    assert.equal(report.status, 'flagged');
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].id, 'T-A');
+    assert.equal(report.results[0].flagged, true);
+    assert.equal(report.results[0].reason, 'test-tier prohibition has no passing wired enforcement check');
+    assert.ok(r.reasons.some((x) => x.code === 'enforcement_flagged'));
+    assert.equal(exitCodeFor(r), 1);
+  });
+
+  it('enforceFailsClosedOnHostFailure', () => {
+    for (const verdict of [new Error('spawn failed'), 'not json', Object.assign(new Error('slow'), { code: 'ETIMEDOUT' })]) {
+      const { m } = setupEnforce({ orders: doc({ orders: [T_A] }), plan: planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] }), verdicts: { 'T-A': verdict } });
+      const r = run(m, 'enforce');
+      assert.equal(r.enforcement, 'flagged');
+      assert.equal(r.results[0].flagged, true);
+      assert.ok(lineSet(m, VERDICT).has('enforcement: flagged'));
+      assert.equal(exitCodeFor(r), 1);
+    }
+    // no host CLI at all
+    const m = setup({ orders: doc({ orders: [T_A] }), files: { [PLAN]: planText({ prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] }) } });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.ok(r.results[0].reason.startsWith('host_unavailable'), r.results[0].reason);
+    assert.equal(m.calls.execFile.length, 0);
+  });
+
+  it('enforceMixedResults', () => {
+    const { m, execCalls } = setupEnforce({ verdicts: { 'T-B': FLAGGED } });
+    const r = run(m, 'enforce');
+    assert.equal(r.enforcement, 'flagged');
+    assert.deepEqual(execCalls.map((c) => c.id), ['T-A', 'T-B'], 'one host call per applicable test order, in id order');
+    const report = JSON.parse(m.read(ENFORCEMENT_PATH));
+    assert.deepEqual(report.results.map((x) => [x.id, x.flagged]), [
+      ['T-A', false],
+      ['T-B', true],
+    ]);
+    assert.equal(r.reasons.filter((x) => x.code === 'enforcement_flagged').length, 1);
+    assert.ok(r.reasons.some((x) => x.message.startsWith('T-B: ')));
+  });
+
+  it('enforceWritesPendingFirst', () => {
+    const stale = '---\nschema: "1"\nphase: "03-billing"\nconflicts: clear\ncoverage: complete\nenforcement: clear\ngenerated_by: enforce\napplicable: ""\n---\n\nold\n';
+    const { m, execCalls, snapshots } = setupEnforce({ extraFiles: { [VERDICT]: stale } });
+    const order = [];
+    const realWrite = m.deps.writeFile;
+    m.deps.writeFile = (p, text) => {
+      order.push(`write:${path.basename(p).split('.tmp-')[0]}`);
+      return realWrite(p, text);
+    };
+    run(m, 'enforce');
+    assert.ok(execCalls.length > 0);
+    for (const snapshot of snapshots) {
+      const lines = snapshot.split('\n');
+      assert.ok(lines.includes('enforcement: pending'), lines.join('|'));
+      assert.ok(!lines.includes('enforcement: clear'), 'a stale clear never survives into a host call');
+    }
+    assert.equal(order[0], 'write:STANDING-ORDERS.md', order.join());
+    assert.deepEqual(order, ['write:STANDING-ORDERS.md', 'write:ENFORCEMENT.json', 'write:STANDING-ORDERS.md']);
+    assert.ok(lineSet(m, VERDICT).has('enforcement: clear'));
+  });
+
+  it('enforceVerdictWriteFails', () => {
+    const { m, execCalls } = setupEnforce({
+      overrides: {
+        writeFile: () => {
+          throw new Error('EROFS');
+        },
+      },
+    });
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, false);
+    assert.equal(r.errors[0].code, 'write_failed');
+    assert.equal(execCalls.length, 0, 'no host call when the pending verdict could not be written');
+    assert.equal(m.calls.error.length, 1);
+    assert.equal(exitCodeFor(r), 2);
+  });
+
+  it('enforceReportWriteFails', () => {
+    const { m, execCalls } = setupEnforce();
+    const realWrite = m.deps.writeFile;
+    m.deps.writeFile = (p, text) => {
+      if (path.basename(p).startsWith('ENFORCEMENT.json')) throw new Error('disk full');
+      return realWrite(p, text);
+    };
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, false);
+    assert.equal(r.errors[0].code, 'write_failed');
+    assert.ok(execCalls.length > 0, 'the checks ran before the report write failed');
+    const lines = lineSet(m, VERDICT);
+    assert.ok(lines.has('enforcement: error'), [...lines].join('|'));
+    assert.ok(!lines.has('enforcement: clear'));
+    assert.equal(m.has(ENFORCEMENT_PATH), false);
+    assert.equal(m.calls.error.length, 1);
+    assert.equal(exitCodeFor(r), 2);
+  });
+
+  it('enforceKeepsConflictsTruthful', () => {
+    const orders = doc({
+      contexts: { 'ctx-a': { description: 'a' } },
+      orders: [variant('REF-A', 'refund.amount', ['ctx-a'], 'full', { scope: SCOPE_BILLING }), variant('REF-B', 'refund.amount', ['ctx-a'], 'prorated', { scope: SCOPE_BILLING }), T_A],
+    });
+    const plan = planText({
+      truths: [
+        { statement: 'REF-A: full', verification: 'backstop' },
+        { statement: 'REF-B: prorated', verification: 'backstop' },
+      ],
+      prohibitions: [testProjection('T-A', 'tests/a.test.cjs')],
+    });
+    const { m, execCalls } = setupEnforce({ orders, plan });
+    const r = run(m, 'enforce');
+    assert.equal(r.ok, true);
+    assert.equal(r.conflicts, 'blocked');
+    assert.equal(r.enforcement, 'clear');
+    assert.deepEqual(execCalls.map((c) => c.id), ['T-A'], 'enforcement is still evaluated');
+    const lines = lineSet(m, VERDICT);
+    assert.ok(lines.has('conflicts: blocked'));
+    assert.ok(lines.has('enforcement: clear'));
+    assert.equal(exitCodeFor(r), 1);
+  });
+
+  it('enforceHumanOutputNamesEnforcement', () => {
+    const { m } = setupEnforce({ verdicts: { 'T-A': FLAGGED } });
+    run(m, 'enforce', PHASE_FLAG, { raw: false });
+    assert.ok(m.calls.log[0].startsWith('standing-orders enforce: phase .planning/phases/03-billing'), m.calls.log[0]);
+    assert.ok(m.calls.log[0].includes('enforcement flagged'), m.calls.log[0]);
+    assert.ok(m.calls.log.some((l) => l.startsWith('  enforcement_flagged: T-A')), m.calls.log.join('|'));
+  });
+
+  it('enforceUsageErrorsRunNothing', () => {
+    for (const extra of [[], ['--phase-dir', PHASE, '--bogus'], ['--phase', '3', '--phase-dir', PHASE], ['--phase-dir', PHASE, 'positional']]) {
+      const { m, execCalls } = setupEnforce();
+      const r = run(m, 'enforce', extra);
+      assert.equal(r.ok, false, extra.join(' '));
+      assert.equal(r.errors[0].code, 'usage');
+      assert.ok(r.errors[0].message.includes('standing-orders enforce'));
+      assert.equal(execCalls.length, 0);
+      assert.deepEqual(m.calls.readFile, []);
+      noWrites(m);
+      assert.equal(exitCodeFor(r), 1);
+    }
+  });
+});
+
+describe('router select and coverage enforcement field', () => {
+  it('selectAndCoverageWriteEnforcementPending', () => {
+    const select = setup();
+    const rs = run(select, 'select');
+    assert.equal(rs.enforcement, 'pending');
+    assert.ok(lineSet(select, VERDICT).has('enforcement: pending'));
+
+    const stale = '---\nschema: "1"\nphase: "03-billing"\nconflicts: clear\ncoverage: complete\nenforcement: clear\ngenerated_by: enforce\napplicable: ""\n---\n\nold\n';
+    const reset = setup({ files: { [VERDICT]: stale } });
+    run(reset, 'select');
+    assert.ok(lineSet(reset, VERDICT).has('enforcement: pending'), 'select resets a stale enforcement: clear');
+    assert.ok(!lineSet(reset, VERDICT).has('enforcement: clear'));
+
+    const cover = setup({ files: { [PLAN]: planText({ truths: [bsProjection('BILL-RULE')] }), [VERDICT]: stale } });
+    const rc = run(cover, 'coverage');
+    assert.equal(rc.coverage, 'complete');
+    assert.equal(rc.enforcement, 'pending');
+    assert.ok(lineSet(cover, VERDICT).has('enforcement: pending'));
+    assert.ok(!lineSet(cover, VERDICT).has('enforcement: clear'));
+
+    const conflicts = setup();
+    const rk = run(conflicts, 'conflicts');
+    assert.equal(rk.enforcement, null);
+    assert.deepEqual(rk.written, []);
+  });
+
+  it('humanOutputShowsPendingEnforcementForSelect', () => {
+    const m = setup();
+    run(m, 'select', PHASE_FLAG, { raw: false });
+    assert.ok(m.calls.log[0].includes('enforcement pending'), m.calls.log[0]);
+    const k = setup();
+    run(k, 'conflicts', PHASE_FLAG, { raw: false });
+    assert.ok(!k.calls.log[0].includes('enforcement'), k.calls.log[0]);
+  });
+
+  it('exitCodeForEnforcement', () => {
+    const base = { subcommand: 'enforce', ok: true, disabled: false, conflicts: 'clear', coverage: 'complete' };
+    assert.equal(exitCodeFor({ ...base, enforcement: 'clear' }), 0);
+    assert.equal(exitCodeFor({ ...base, enforcement: 'pending' }), 0);
+    assert.equal(exitCodeFor({ ...base, enforcement: null }), 0);
+    assert.equal(exitCodeFor({ ...base, enforcement: 'flagged' }), 1);
+    assert.equal(exitCodeFor({ ...base, enforcement: 'error' }), 1);
+    assert.equal(exitCodeFor({ ...base, subcommand: 'coverage', enforcement: 'pending' }), 0);
+    assert.equal(exitCodeFor({ ...base, enforcement: 'clear', conflicts: 'blocked' }), 1);
+  });
+
+  it('unknownSubcommandListsEnforce', () => {
+    const m = setup();
+    const r = run(m, 'nope');
+    assert.equal(r.ok, false);
+    assert.ok(r.error.includes('Available: select, conflicts, coverage, enforce, validate'), r.error);
+    assert.ok(m.calls.error[0].includes('enforce'));
+    const none = routeStandingOrdersCommand({ args: ['standing-orders'], cwd: m.cwd, raw: true, error: m.error, deps: m.deps });
+    assert.ok(none.error.includes('Available: select, conflicts, coverage, enforce, validate'), none.error);
+  });
+});
+
+describe('router coverage check-file and projection rules', () => {
+  const TEST_ONLY = doc({ orders: [T_A] });
+
+  // AC8 end to end: a plan that lists the check file it must not touch.
+  it('coverageRejectsCheckTargetEditE2E', () => {
+    const edit = planText({ files: ['src/billing/refund.js', 'tests/a.test.cjs'], prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] });
+    const m = setup({ orders: TEST_ONLY, files: { [PLAN]: edit } });
+    const r = run(m, 'coverage');
+    assert.equal(r.ok, true);
+    assert.equal(r.coverage, 'incomplete');
+    assert.deepEqual(r.checkFileEdits, [{ plan: '03-01-PLAN.md', file: 'tests/a.test.cjs', id: 'T-A' }]);
+    assert.ok(r.reasons.some((x) => x.code === 'check_file_modified' && x.message.includes('03-01-PLAN.md') && x.message.includes('tests/a.test.cjs') && x.message.includes('T-A')));
+    assert.ok(lineSet(m, VERDICT).has('coverage: incomplete'));
+    assert.equal(exitCodeFor(r), 1);
+
+    const fixture = planText({ files: ['tests/fixtures/bad.js'], prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] });
+    const f = run(setup({ orders: TEST_ONLY, files: { [PLAN]: fixture } }), 'coverage');
+    assert.equal(f.coverage, 'incomplete');
+    assert.deepEqual(f.checkFileEdits.map((e) => e.file), ['tests/fixtures/bad.js']);
+
+    const control = planText({ files: ['src/billing/refund.js'], prohibitions: [testProjection('T-A', 'tests/a.test.cjs')] });
+    const c = run(setup({ orders: TEST_ONLY, files: { [PLAN]: control } }), 'coverage');
+    assert.equal(c.coverage, 'complete');
+    assert.deepEqual(c.checkFileEdits, []);
+    assert.deepEqual(c.notProjected, []);
+    assert.equal(exitCodeFor(c), 0);
+  });
+
+  it('coverageRequiresProjectionE2E', () => {
+    const cited = planText({ truths: ['T-A holds'] });
+    const m = setup({ orders: TEST_ONLY, files: { [PLAN]: cited } });
+    const r = run(m, 'coverage');
+    assert.equal(r.coverage, 'incomplete');
+    assert.deepEqual(r.notProjected, ['T-A']);
+    assert.deepEqual(r.uncited, []);
+    assert.ok(r.reasons.some((x) => x.code === 'not_projected'));
+    assert.equal(exitCodeFor(r), 1);
+    assert.ok(lineSet(m, VERDICT).has('coverage: incomplete'));
+
+    const uncited = run(setup({ orders: TEST_ONLY, files: { [PLAN]: planText({ truths: ['unrelated'] }) } }), 'coverage');
+    assert.deepEqual(uncited.uncited, ['T-A']);
+    assert.deepEqual(uncited.notProjected, []);
   });
 });

@@ -251,3 +251,58 @@ describe('renderApplicable', () => {
     assert.ok(out.text.includes('insufficient_spec'));
   });
 });
+
+describe('renderApplicable projection line', () => {
+  const { projectionOf } = require('../lib/phase.cjs');
+  const { testOrder } = require('./helpers/fixtures.cjs');
+  const PREFIX = '- Project as: ';
+
+  const blocks = parsed({
+    orders: [
+      testOrder({ id: 'T-1', statement: 'Never double refund.', check_target: 'tests/x.test.cjs' }),
+      testOrder({ id: 'L-1', statement: 'No eval.', check_kind: 'lint-rule', check_target: 'src/a.js', check_rule: 'local/no-eval' }),
+      order({ id: 'B-1', statement: 'Be fair.' }),
+    ],
+  }).orders;
+
+  it('applicableHasProjectionLine', () => {
+    const out = renderApplicable(blocks, { maxBytes: 100000 });
+    const lines = out.text.split('\n');
+    assert.deepEqual(out.included.slice().sort(), ['B-1', 'L-1', 'T-1']);
+    for (const o of blocks) {
+      const { section, item } = projectionOf(o);
+      const at = lines.findIndex((l) => l.startsWith(PREFIX) && l.includes(`${o.id}: `));
+      assert.ok(at > 0, `a Project as line for ${o.id}`);
+      const line = lines[at];
+      assert.ok(line.startsWith(`${PREFIX}must_haves.${section} item {`), line);
+      assert.deepEqual(JSON.parse(line.slice(`${PREFIX}must_haves.${section} item `.length)), item, `the line carries exactly the projected item for ${o.id}`);
+      assert.ok(lines[at - 1].startsWith('- Check:'), `Project as follows Check for ${o.id}: ${lines[at - 1]}`);
+    }
+    assert.ok(lines.includes('- Project as: must_haves.truths item {"statement":"B-1: Be fair.","verification":"backstop"}'));
+    assert.equal(lines.filter((l) => l.startsWith(PREFIX)).length, 3, 'exactly one line per order');
+  });
+
+  it('projectionLineStaysOnOneLine', () => {
+    const [LS, PS, NEL] = [0x2028, 0x2029, 0x85].map((c) => String.fromCharCode(c));
+    const hostile = parsed({ orders: [order({ id: 'H-1', statement: `a${LS}## FAKE${NEL}b${PS}c\nd` })] }).orders;
+    const out = renderApplicable(hostile, { maxBytes: 100000 });
+    const lines = out.text.split('\n');
+    const line = lines.find((l) => l.startsWith(PREFIX));
+    assert.ok(line, 'projection line present');
+    assert.ok(line.includes('## FAKE'), 'text kept');
+    for (const ch of [LS, PS, NEL]) assert.equal(out.text.includes(ch), false);
+    assert.equal(lines.filter((l) => l.startsWith('## ')).length, 1, 'no injected heading');
+  });
+
+  it('longerBlocksStillPackWhole', () => {
+    const full = renderApplicable(blocks, { maxBytes: 100000 });
+    const oneBlock = renderApplicable([blocks[0]], { maxBytes: 100000 });
+    assert.ok(oneBlock.text.includes(PREFIX), 'the projection is part of the packed block');
+    const r = renderApplicable(blocks, { maxBytes: oneBlock.bytes });
+    assert.ok(r.included.length < full.included.length);
+    assert.ok(r.bytes <= oneBlock.bytes);
+    for (const id of r.included) assert.ok(r.text.includes(`${id}: `) || r.text.includes(id));
+    const projectionLines = r.text.split('\n').filter((l) => l.startsWith(PREFIX)).length;
+    assert.equal(projectionLines, r.included.length, 'a block is never cut between its Check and Project as lines');
+  });
+});

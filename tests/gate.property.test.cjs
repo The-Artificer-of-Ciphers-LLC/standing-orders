@@ -76,3 +76,60 @@ describe('gate properties', () => {
     );
   });
 });
+
+const { projectionOf, isProjected } = require('../lib/phase.cjs');
+
+describe('projection properties', () => {
+  const idArb = fc.stringMatching(/^[A-Z][A-Z0-9]{0,6}(-[A-Z0-9]{1,4}){0,2}$/);
+  const pathArb = fc.stringMatching(/^[a-z]{1,6}(\/[a-z]{1,6}){0,3}\.cjs$/);
+  const maybePath = fc.option(pathArb, { nil: undefined });
+  const orderArb = fc
+    .record({
+      id: idArb,
+      statement: fc.stringMatching(/^[a-z][a-z ]{0,40}$/),
+      verification: fc.constantFrom('test', 'backstop'),
+      check_kind: fc.constantFrom('node-test', 'lint-rule'),
+      check_target: pathArb,
+      check_rule: fc.option(fc.stringMatching(/^[a-z]{1,6}\/[a-z-]{1,10}$/), { nil: undefined }),
+      check_violation_fixture: maybePath,
+      check_clean_fixture: maybePath,
+    })
+    .map((o) => {
+      const out = { kind: 'prohibition' };
+      for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+      return out;
+    });
+
+  it('projectionRoundTrips', () => {
+    fc.assert(
+      fc.property(orderArb, (o) => {
+        const p = projectionOf(o);
+        assert.equal(p.section, o.verification === 'test' ? 'prohibitions' : 'truths');
+        assert.equal(isProjected(o, { [p.section]: [p.item] }), true, JSON.stringify(p));
+      }),
+      { seed: SEED, numRuns: 300 },
+    );
+  });
+
+  it('aProjectionNeverSatisfiesTheOtherSection', () => {
+    fc.assert(
+      fc.property(orderArb, (o) => {
+        const p = projectionOf(o);
+        const other = p.section === 'truths' ? 'prohibitions' : 'truths';
+        assert.equal(isProjected(o, { [other]: [p.item] }), false);
+      }),
+      { seed: SEED, numRuns: 200 },
+    );
+  });
+
+  it('projectionRoundTripsOnlyForItsOwnId', () => {
+    fc.assert(
+      fc.property(orderArb, orderArb, (a, b) => {
+        fc.pre(a.id !== b.id);
+        const p = projectionOf(a);
+        assert.equal(isProjected(b, { [p.section]: [p.item] }), false);
+      }),
+      { seed: SEED, numRuns: 200 },
+    );
+  });
+});
