@@ -1,0 +1,105 @@
+# How to gate GSD planning on your standing orders
+
+Install Standing Orders into a GSD project, turn it on, and get every phase's plans checked against the rules in `ORDERS.yaml`: the planner sees only the rules that apply to the phase, conflicting rules stop planning, and a phase whose plans do not cite every applicable rule cannot reach execution.
+
+**Before you start:** GSD (gsd-core) 1.19.0 or newer, Node 20 or newer, and a project with a `.planning/` directory. To write the rules themselves, see [How to validate ORDERS.yaml](validate-standing-orders.md) and the [schema reference](../../references/standing-orders.md#orders).
+
+## 1. Install the capability
+
+From a git tag (recommended):
+
+```bash
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.2.0
+```
+
+or from a local directory:
+
+```bash
+gsd capability install ./path/to/standing-orders --scope project
+```
+
+GSD copies the whole directory, so use a fresh clone. A development checkout where you ran `npm install` is refused, because `node_modules/.bin` holds symlinks and GSD never stages a symlink.
+
+GSD shows what the capability ships and asks for consent before it installs anything. Standing Orders ships one executable surface, the `standing-orders` command module. Accept it, or pass `--yes` to consent up front. Then check it is listed without errors:
+
+```bash
+gsd capability list
+```
+
+## 2. Turn it on
+
+Installing changes nothing until you enable it:
+
+```bash
+gsd config-set standing-orders.enabled true
+```
+
+or put it in `.planning/config.json` yourself, nested the way GSD stores capability settings:
+
+```json
+{ "standing-orders": { "enabled": true } }
+```
+
+Optionally choose what blocks planning (default `conflict`):
+
+```bash
+gsd config-set standing-orders.block_on conflict_or_missing
+```
+
+`conflict_or_missing` also blocks when an applicable `test`-tier rule's check file does not exist yet. `never` reports everything and blocks nothing.
+
+## 3. Add your rules
+
+Write `.planning/standing-orders/ORDERS.yaml` and validate it:
+
+```bash
+gsd-tools standing-orders validate
+```
+
+Give each rule a `scope` (`paths` globs and/or `requirements` ids) so it reaches only the phases that touch that code. A rule with no scope applies to every phase.
+
+## 4. Plan a phase as usual
+
+```bash
+/gsd:plan-phase 3
+```
+
+Before writing plans, the planner runs `standing-orders select` for the phase. That writes:
+
+- `.planning/standing-orders/APPLICABLE.md` — the rules that apply to this phase, which the planner reads;
+- `.planning/standing-orders/CONFLICTS.json` — the full conflict report;
+- `STANDING-ORDERS.md` in the phase directory — the verdict the gates read.
+
+The planner cites each applicable rule's id in a plan's `must_haves`. After planning, `standing-orders coverage` re-checks the written plans, and the phase cannot proceed unless the verdict says `conflicts: clear` and `coverage: complete`.
+
+You can run the same check yourself at any time, without writing anything:
+
+```bash
+gsd-tools standing-orders conflicts --phase 3
+```
+
+## 5. If planning stops
+
+Open the phase's `STANDING-ORDERS.md`; each finding is one line with a reason code.
+
+| Reason code | What to do |
+|---|---|
+| `conflict` | Two applicable rules contradict each other. Fix one of them in `ORDERS.yaml` (narrow its `contexts`, or correct an `outcome`), then re-run `/gsd:plan-phase`. |
+| `orders_invalid` | `ORDERS.yaml` has errors. Run `gsd-tools standing-orders validate` and fix what it lists. |
+| `orders_unreadable` | `ORDERS.yaml` could not be read (over 256 KiB, a link that leaves the project, or a permissions problem). |
+| `missing_check` | Only with `block_on: conflict_or_missing`. Write the check file the rule names, or set the rule to `verification: backstop` until it exists. |
+| `uncited` | A plan must cite that rule's id in its `must_haves`. Re-run planning, or add the citation to the plan that implements the rule. |
+| `no_plans` | Rules apply but the phase has no plans yet. |
+| `plan_unreadable` | A plan's frontmatter could not be parsed (for example it uses YAML anchors). Fix that plan. |
+
+`coverage: error` means the coverage check itself failed partway; re-run `/gsd:plan-phase`.
+
+## Nothing to report versus could not look
+
+- **No `ORDERS.yaml`** is not an error: there are simply no rules yet, and every check passes (`orders_file_missing` warning).
+- **Disabled** (`standing-orders.enabled` absent or false): the commands print that they are disabled and write nothing, and no gate runs. Your GSD output is exactly what it would be without the capability.
+- **Could not look:** if a command cannot resolve the phase (`phase_unresolved`, `host_unavailable`, `phase_dir_not_found`) or cannot write its files (`write_failed`), it fails instead of reporting a verdict. The plan:post gate then finds no current verdict and blocks. Run the command by hand with `--phase-dir .planning/phases/<dir>` to see the error.
+
+## Known limit
+
+gsd-core 1.19 and 1.20 do not yet run a capability's own `plan:pre` step and gate ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)). Until they do, the `plan:pre` check is the planner running `select` as its contribution instructs; the guaranteed stop is the `plan:post` gate, before any code is executed.

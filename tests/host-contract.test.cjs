@@ -85,6 +85,7 @@ function tryRun(args, cwd, home) {
 }
 
 function lastJson(stdout) {
+  try { return JSON.parse(stdout); } catch { /* router prints one JSON line after any banner */ }
   const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
   return JSON.parse(lines[lines.length - 1]);
 }

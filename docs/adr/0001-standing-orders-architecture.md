@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
-- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -252,6 +252,20 @@ The `plan:pre` step's `onError` is `halt` because the gate depends on its output
 **A3 — Rollout corrected by the phase-coverage check.** As first written, the `verify:pre` verifier contribution (PRD R12, acceptance criterion 4) and the schema reference document were owned by no phase, and phase 1's `standing-orders validate` had no reachable surface before the phase 2 manifest. Corrected: the verifier contribution moves to **phase 3**; the reference document lands in **phase 1**; `validate` is reachable in phase 1 as a direct CLI (`node standing-orders-router.cjs validate [file] [--raw]`) and through `gsd_run` from phase 2. The corrected trace passes the coverage check with zero gaps.
 
 **A4 — Dependencies.** Install is copy-only (ADR-1244 D5 rule 1; `src/capability-source.cts:786`), so the capability has no runtime npm dependencies. js-yaml 4.3.2 (`dist/js-yaml.js`, MIT) is vendored at `lib/vendor/js-yaml.cjs`, byte-identical to gsd-core's own vendored copy, with the same `FAILSAFE_SCHEMA` + anchor-refusing listener posture as `src/frontmatter.cts:240-263`; `scripts/check-vendored.cjs` guards drift against the pinned devDependency.
+
+## Amendments (2026-11-07, phase 2)
+
+**A5 — The host does not dispatch third-party `plan:pre` steps or gates; the block moves to `plan:post`, with a planner-run select in front of it.** gsd-core 1.19–1.20 `workflows/plan-phase.md` §5.6 runs a `plan:pre` step only when it is a `ref.skill` (and only under auto-chain) or a `ref.agent`, and evaluates only its hardcoded UI and drift gates. A `ref.command` step or a `predicate` gate at `plan:pre` is validated, rendered by `loop render-hooks`, and never run. `plan:post` (§13e) dispatches every step and every gate per `references/loop-hook-dispatch.md`. A `plan:pre` contribution cannot reach the orchestrator either: that point's roles are `researcher`, `planner` and `checker`. Reported upstream as [open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982) (sibling of #5960). Decision, confirmed by the maintainer on 2026-11-07:
+
+- The manifest still declares the `plan:pre` step (`standing-orders select`) and a blocking `plan:pre` predicate gate, so both start running once the host dispatches them. `select` is idempotent, so a host-run and a planner-run select cannot disagree.
+- The `plan:pre` planner contribution tells the planner to run `standing-orders select` itself before writing plans and to stop on `"conflicts": "blocked"`. This is defense in depth, not the mechanical block.
+- The mechanical block is at `plan:post`: a `standing-orders coverage` step recomputes conflicts and citations, and two blocking `artifact-frontmatter-equals` gates read the verdict it writes. A conflict therefore always stops the phase before execution; until #5982 is fixed it may not stop the planner from running first.
+
+Gate shape (open question 1): every gate is `artifact-frontmatter-equals` over `<phase dir>/STANDING-ORDERS.md` (`conflicts == clear`, `coverage == complete`). `command-exit-zero` was rejected because `gsd_run` is a shell function in the workflows, not a binary on the bounded `sh` PATH the predicate runs in.
+
+Phase resolution: a `ref.command` step receives only `--phase <N>`. The router resolves the phase directory and requirement ids through the host's public `init plan-phase <N> --raw`, the call plan-phase itself makes, in a bounded subprocess. It does not reimplement gsd-core's phase locator (custom, bracket and workstream naming).
+
+Selection scope at `plan:pre`: a phase's files are the paths its planning documents name plus any existing plans' `files_modified`. `coverage` at `plan:post` recomputes from the plans' actual `files_modified` and `requirements`, so an order that becomes applicable only once the plans exist must still be cited. A conflict blocks only when at least one of its orders applies to the phase; an invalid or unreadable `ORDERS.yaml` always blocks unless `block_on` is `never`.
 
 ## Alternatives considered
 
