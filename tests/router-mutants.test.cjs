@@ -740,12 +740,14 @@ describe('router mutants: --run', () => {
     run(m, RUN);
     assert.equal(prover.calls.length, 3);
     prover.calls.length = 0;
+    run(m, ['coverage', '--phase-dir', PHASE]); // #15: --run wrote the cache, a protected file; coverage records it before enforce
     const r = run(m, ['enforce', '--phase-dir', PHASE]);
     assert.equal(r.enforcement, 'clear', JSON.stringify(r.reasons));
     assert.deepEqual(fixtures(prover), [BAD], 'enforce reuses what --run learned');
     assert.deepEqual(r.results[0].mutants.map((x) => x.cached), [true, true]);
     // and the other way round
     const other = hardened({ phase: true });
+    run(other.m, ['coverage', '--phase-dir', PHASE]);
     run(other.m, ['enforce', '--phase-dir', PHASE]);
     other.prover.calls.length = 0;
     const runAgain = run(other.m, RUN);

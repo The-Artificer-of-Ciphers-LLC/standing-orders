@@ -38,6 +38,8 @@ A rule is proven only when its check fails on the rule's violation fixture, pass
 | `host_timeout` | No verdict within 180 s. | Make the check faster, or split it. A check that hangs is never counted as passing. |
 | `host_failed` | `gsd-tools` exited with an error; the message carries its first stderr line. | Fix what that line names (often an old gsd-core: Standing Orders needs 1.19.0 or newer). |
 | `host_output_invalid` | `gsd-tools` answered with something that is not a verdict. | Run the `check prohibition-enforcement` command below and read its output. |
+| `check_file_changed: <paths>` | A check file, fixture, mutant or `ORDERS.yaml` changed after planning (`coverage` recorded its hash in `STANDING-ORDERS-INTEGRITY.json`). No check was run, so an edited check is never trusted. | If the change was unintended, restore the file (`git checkout -- <path>`). If it was intended, it belongs in its own change outside the executing phase: revert it here, make it separately, then re-plan the phase (`select`, then `coverage`) so the new hashes are recorded. Re-running `coverage` alone will not accept a changed check file. |
+| `integrity_missing` | The phase has no usable integrity record (planned before Standing Orders 0.7.0, or the file is missing or damaged). | Re-run `gsd-tools standing-orders coverage --phase N`, then the wave. |
 | `request_too_large` | The rule's fields are too long to pass on a command line. | Shorten the rule's paths or rule id. |
 
 `enforcement: error` means `ORDERS.yaml` is invalid or unreadable, or the results could not be written. Run `gsd-tools standing-orders validate`.

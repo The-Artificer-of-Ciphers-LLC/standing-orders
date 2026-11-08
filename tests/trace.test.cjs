@@ -135,7 +135,7 @@ describe('orderHash: check_mutants', () => {
   // The ledger records `flagged` for an order whose mutant survived: the result keeps status green, flagged true.
   it('dispositionSeesMutantFlag', () => {
     const o = base();
-    const enforcement = (result) => ({ phase: PHASE_3, results: [{ id: 'TEST-1', ...result }] });
+    const enforcement = (result) => ({ phase: PHASE_3, integrity: { files: {} }, results: [{ id: 'TEST-1', order_hash: orderHash(o), ...result }] });
     const killed = { status: 'green', flagged: false, reason: 'ok', mutants: [{ path: 'm.js', outcome: 'killed', cached: false, reason: 'ok' }] };
     const survived = { status: 'green', flagged: true, reason: 'mutant_survived: m.js', mutants: [{ path: 'm.js', outcome: 'survived', cached: false, reason: 'x' }] };
     assert.equal(dispositionFor(o, enforcement(killed), PHASE_3), 'proven');
@@ -281,8 +281,8 @@ describe('latestById', () => {
 describe('dispositionFor', () => {
   const T = parsed({ orders: [testOrder({ id: 'T-1' })] }).orders[0];
   const B = parsed({ orders: [order({ id: 'B-1' })] }).orders[0];
-  const result = (extra = {}) => ({ id: 'T-1', status: 'green', flagged: false, ...extra });
-  const enf = (results, phase = PHASE_3) => ({ schema: 1, phase, status: 'clear', results });
+  const result = (extra = {}) => ({ id: 'T-1', status: 'green', flagged: false, order_hash: orderHash(T), ...extra });
+  const enf = (results, phase = PHASE_3) => ({ schema: 1, phase, status: 'clear', integrity: { files: {} }, results });
 
   it('dispositionTable', () => {
     // a backstop order is insufficient_spec whatever ENFORCEMENT.json says
@@ -380,7 +380,7 @@ describe('buildRecords', () => {
   });
 
   it('buildRecordsUsesEnforcementAndAllowsNullSha', () => {
-    const enforcement = { schema: 1, phase: PHASE_3, status: 'clear', results: [{ id: 'T-1', status: 'green', flagged: false }] };
+    const enforcement = { schema: 1, phase: PHASE_3, status: 'clear', integrity: { files: {} }, results: [{ id: 'T-1', status: 'green', flagged: false, order_hash: orderHash(byId['T-1']) }] };
     const [t] = buildRecords({ applicable: [byId['T-1']], document, phaseRel: PHASE_3, plans: [], files: [], enforcement, commitSha: null, ts: TS });
     assert.equal(t.disposition, 'proven');
     assert.equal(t.commit_sha, null);

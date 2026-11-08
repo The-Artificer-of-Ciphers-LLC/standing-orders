@@ -9,7 +9,7 @@ const childProcess = require('node:child_process');
 
 const router = require('../standing-orders-router.cjs');
 const { routeStandingOrdersCommand, exitCodeFor } = router;
-const { TRACE_PATH, MAX_TRACE_BYTES, parseTrace } = require('../lib/trace.cjs');
+const { TRACE_PATH, MAX_TRACE_BYTES, parseTrace, orderHash } = require('../lib/trace.cjs');
 const { HOST_TIMEOUT_MS } = require('../lib/host.cjs');
 const { doc, order, testOrder } = require('./helpers/fixtures.cjs');
 const { memfs, CWD } = require('./helpers/memfs.cjs');
@@ -471,7 +471,7 @@ describe('router trace', () => {
 
   it('enforcementFeedsDisposition', () => {
     const t = testOrder({ id: 'T-A', statement: 'Never A.', scope: SCOPE_BILLING, check_target: 'tests/a.test.cjs' });
-    const enforcement = JSON.stringify({ schema: 1, phase: PHASE, status: 'clear', results: [{ id: 'T-A', status: 'green', flagged: false }] });
+    const enforcement = JSON.stringify({ schema: 1, phase: PHASE, status: 'clear', integrity: { files: {} }, results: [{ id: 'T-A', status: 'green', flagged: false, order_hash: orderHash(t) }] });
     const proven = setupTrace({ orders: doc({ orders: [t] }), files: { '.planning/standing-orders/ENFORCEMENT.json': enforcement } });
     run(proven, 'trace');
     assert.equal(traceLines(proven)[0].disposition, 'proven');
@@ -749,7 +749,7 @@ describe('router impact and stale', () => {
 const ENFORCEMENT = '.planning/standing-orders/ENFORCEMENT.json';
 const LINK_KINDS = { dangling: '/nonexistent/pwned.txt', inRoot: path.resolve(CWD, ORDERS), outside: '/etc/outside/TRACE.jsonl' };
 const ENFORCED_ORDER = testOrder({ id: 'T-A', statement: 'Never A.', scope: SCOPE_BILLING, check_target: 'tests/a.test.cjs' });
-const GREEN_ENFORCEMENT = JSON.stringify({ schema: 1, phase: PHASE, status: 'clear', results: [{ id: 'T-A', status: 'green', flagged: false }] });
+const GREEN_ENFORCEMENT = JSON.stringify({ schema: 1, phase: PHASE, status: 'clear', integrity: { files: {} }, results: [{ id: 'T-A', status: 'green', flagged: false, order_hash: orderHash(ENFORCED_ORDER) }] });
 
 describe('router trace hardening (R1-R7)', () => {
   it('traceRefusesALinkedLedger', () => {

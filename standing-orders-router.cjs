@@ -34,16 +34,17 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const { parseOrders, ERROR_CODES, KINDS, VERIFICATIONS } = require('./lib/orders.cjs');
 const { detectConflicts } = require('./lib/conflicts.cjs');
 const { readCapabilityConfig } = require('./lib/config.cjs');
-const { collectPhaseInputs, splitReqIds } = require('./lib/phase.cjs');
+const { collectPhaseInputs, splitReqIds, protectedSet, canonicalPath, ORDERS_PATH } = require('./lib/phase.cjs');
 const { resolvePhase, runEnforcement, findHostCli, HOST_TIMEOUT_MS } = require('./lib/host.cjs');
 const { evaluateBlock, evaluateCoverage, evaluateEnforcement, renderVerdict, STATUS } = require('./lib/gate.cjs');
 const { selectApplicable, renderApplicable, normalizePath } = require('./lib/select.cjs');
 const { errMessage, unique, isPlainObject, compareStrings } = require('./lib/util.cjs');
-const { TRACE_PATH, MAX_TRACE_BYTES, isValidPhase, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
+const { TRACE_PATH, MAX_TRACE_BYTES, orderHash, isValidPhase, buildRecords, parseTrace, newRecords, appendText, impactOf, staleOf } = require('./lib/trace.cjs');
 const { MAX_PHASE_FILE_BYTES, PROMOTE_CODES, isSpecFileName, isContextFileName, buildCandidates, parseAddArgument, promoteOrder } = require('./lib/promote.cjs');
 const {
   SEMANTIC_FILE,
@@ -310,6 +311,133 @@ function writeAtomic(io, abs, text, seq) {
   io.rename(tmp, abs);
 }
 
+// ─── Integrity of check files and gate inputs ────────────────────────────────
+
+const INTEGRITY_NAME = 'STANDING-ORDERS-INTEGRITY.json';
+/** One hashed file is read up to this many bytes; larger or unreadable files are recorded as such, never skipped. */
+const MAX_HASH_BYTES = 1024 * 1024;
+const MAX_INTEGRITY_BYTES = 4 * 1024 * 1024;
+
+const sha256Hex = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+
+/** What the gate needs to know about the disk to read a files_modified entry: is it a directory, where does it really point. */
+function makeProbe(root, io) {
+  let realRoot = null;
+  try {
+    realRoot = io.realpath(root);
+  } catch (e) {
+    realRoot = null;
+  }
+  const at = (rel) => path.resolve(root, rel);
+  return {
+    isDir: (rel) => io.exists(at(rel)) && !io.isFile(at(rel)),
+    real: (rel) => {
+      if (realRoot === null || !io.exists(at(rel))) return null;
+      const r = path.relative(realRoot, io.realpath(at(rel)));
+      return r === '' || r === '..' || r.startsWith('..' + path.sep) || path.isAbsolute(r) ? null : toSlashes(r);
+    },
+  };
+}
+
+/** sha256 of a project file, null when it does not exist, `unreadable:<kind>` for anything else (never equal to a hash). */
+function hashProjectFile(root, rel, io) {
+  const file = mutantsLib.readContained(root, rel, io, MAX_HASH_BYTES);
+  if (file.error === undefined) return sha256Hex(file.text);
+  return file.kind === 'missing' ? null : `unreadable:${file.kind}`;
+}
+
+const integrityRel = (phaseRel) => `${phaseRel}/${INTEGRITY_NAME}`;
+
+/** The check files whose hashes the record carries: the protected set of every test order, applicable or not. */
+function integrityFiles(document) {
+  return unique(protectedSet(document ? document.orders : []).map((i) => i.file)).sort(compareStrings);
+}
+
+function buildIntegrityRecord({ ev, root, io }) {
+  const files = {};
+  for (const f of integrityFiles(ev.loadedOrders.document)) files[f] = hashProjectFile(root, f, io);
+  const plans = {};
+  for (const p of ev.inputs.plans) plans[p.file] = hashProjectFile(root, `${ev.phaseRel}/${p.file}`, io);
+  return { schema: REPORT_SCHEMA, phase: ev.phaseRel, orders: { path: ORDERS_PATH, sha256: hashProjectFile(root, ORDERS_PATH, io) }, files, plans };
+}
+
+/** A recorded or current hash that stands for a file that could not be hashed never equals anything. */
+const isUnreadable = (h) => typeof h === 'string' && h.startsWith('unreadable:');
+const hashDiffers = (now, recorded) => isUnreadable(now) || isUnreadable(recorded) || now !== recorded;
+
+/** The protected paths (ORDERS.yaml included) whose current hash differs from `rec`. */
+function changedFromRecord(rec, root, io) {
+  const changed = [];
+  if (hashDiffers(hashProjectFile(root, ORDERS_PATH, io), rec.orders.sha256)) changed.push(ORDERS_PATH);
+  for (const f of Object.keys(rec.files).sort(compareStrings)) {
+    if (hashDiffers(hashProjectFile(root, f, io), rec.files[f])) changed.push(f);
+  }
+  return changed;
+}
+
+const isHashOrNull = (v) => v === null || typeof v === 'string';
+const allValues = (obj, test) => Object.keys(obj).every((k) => test(obj[k]));
+
+function validIntegrityRecord(rec, phaseRel) {
+  return (
+    isPlainObject(rec) &&
+    rec.schema === REPORT_SCHEMA &&
+    rec.phase === phaseRel &&
+    isPlainObject(rec.orders) &&
+    rec.orders.path === ORDERS_PATH &&
+    isHashOrNull(rec.orders.sha256) &&
+    isPlainObject(rec.files) &&
+    allValues(rec.files, isHashOrNull) &&
+    isPlainObject(rec.plans) &&
+    allValues(rec.plans, (v) => typeof v === 'string')
+  );
+}
+
+/** The coverage-time record: { record } or { missing } (nothing at all) or { invalid: reason }. */
+function readIntegrityRecord({ phaseRel, root, io }) {
+  const file = mutantsLib.readContained(root, integrityRel(phaseRel), io, MAX_INTEGRITY_BYTES);
+  if (file.error !== undefined) return file.kind === 'missing' ? { missing: true } : { invalid: file.error };
+  let rec;
+  try {
+    rec = JSON.parse(file.text);
+  } catch (e) {
+    return { invalid: `${integrityRel(phaseRel)} is not valid JSON` };
+  }
+  return validIntegrityRecord(rec, phaseRel) ? { record: rec } : { invalid: `${integrityRel(phaseRel)} is not a record for ${phaseRel}` };
+}
+
+/**
+ * Compare the coverage-time record with the disk. No usable record is always `integrity_missing` (a project
+ * with no ORDERS.yaml runs coverage first, which records `orders.sha256: null`); otherwise `flagged` with a
+ * reason, or clear with `files` (the verified hashes).
+ */
+function checkIntegrity({ ev, root, io }) {
+  const read = readIntegrityRecord({ phaseRel: ev.phaseRel, root, io });
+  if (read.record === undefined) {
+    const why = read.invalid !== undefined ? read.invalid : `${integrityRel(ev.phaseRel)} does not exist`;
+    return { applies: true, flagged: true, code: 'integrity_missing', detail: `no usable integrity record (${why}); run standing-orders coverage` };
+  }
+  const rec = read.record;
+  const changed = changedFromRecord(rec, root, io);
+  const plansNow = ev.inputs.plans.map((p) => p.file);
+  const planChanged = unique([...Object.keys(rec.plans), ...plansNow]).filter((p) => hashProjectFile(root, `${ev.phaseRel}/${p}`, io) !== (Object.prototype.hasOwnProperty.call(rec.plans, p) ? rec.plans[p] : undefined)).sort(compareStrings);
+  if (planChanged.length > 0) {
+    ev.warnings.push({ code: 'plan_changed', message: `plan(s) changed since coverage: ${planChanged.join(', ')}; run standing-orders coverage again if their must_haves changed` });
+  }
+  if (changed.length > 0) return { applies: true, flagged: true, code: 'check_file_changed', detail: changed.join(', '), files: rec.files };
+  return { applies: true, flagged: false, files: rec.files, record: rec };
+}
+
+/** `trace` side: the recorded check files whose current hash differs from what enforce verified (canonical paths). */
+function changedSinceEnforce({ enforcement, root, io }) {
+  const out = new Set();
+  const files = isPlainObject(enforcement) && isPlainObject(enforcement.integrity) && isPlainObject(enforcement.integrity.files) ? enforcement.integrity.files : {};
+  for (const f of Object.keys(files)) {
+    if (hashDiffers(hashProjectFile(root, f, io), files[f])) out.add(canonicalPath(f));
+  }
+  return out;
+}
+
 function containPhaseDir(root, phaseDir, io) {
   if (!isInside(root, phaseDir)) {
     return { code: LOOP_CODES.PATH_OUTSIDE_CWD, message: `phase directory ${toSlashes(phaseDir)} resolves outside the project root ${toSlashes(root)}` };
@@ -397,6 +525,10 @@ function evaluateLoop({ subcommand, options, root, phaseDir, reqIds, config, io 
       applicable,
       ordersTotal: loadedOrders.document ? loadedOrders.document.orders.length : 0,
       plans: inputs.plans,
+      allOrders: loadedOrders.document ? loadedOrders.document.orders : [],
+      ordersPath: ORDERS_PATH,
+      root,
+      probe: makeProbe(root, io),
     });
     coverageStatus = cov.status;
     reasons = [...block.reasons, ...cov.reasons];
@@ -468,8 +600,11 @@ function prepareOutputDir({ subcommand, root, io }) {
  * `select` writes the verdict FIRST (coverage pending) so a later failure can
  * never leave a stale `coverage: complete`, then APPLICABLE.md, then CONFLICTS.json.
  */
-function writeSelectOutputs({ ev, config, put }) {
+function writeSelectOutputs({ ev, config, put, root, io }) {
   put(ev.verdictRel, verdictText(ev, STATUS.PENDING, 'select'));
+  // A new selection voids the coverage that was recorded for the old one; a stale record must never survive it.
+  const record = path.resolve(root, integrityRel(ev.phaseRel));
+  if (io.exists(record) || io.isSymlink(record)) io.unlink(record);
   const rendered = applicableText(ev, config);
   put(APPLICABLE_PATH, rendered.text);
   const applicableSet = new Set(ev.applicableIds);
@@ -488,7 +623,22 @@ function writeSelectOutputs({ ev, config, put }) {
   return rendered.omitted;
 }
 
-function writeCoverageOutputs({ ev, put }) {
+/** `coverage` records what the gate looked at BEFORE it writes the verdict, so no verdict ever stands without its record. */
+function writeCoverageOutputs({ ev, root, io, put }) {
+  const fresh = buildIntegrityRecord({ ev, root, io });
+  const tooLarge = Object.keys(fresh.files).sort(compareStrings).filter((f) => fresh.files[f] === 'unreadable:too_large');
+  const reasons = tooLarge.map((f) => ({ code: 'check_file_too_large', message: `check_file_too_large: ${f}` }));
+  // An existing record is the baseline of the phase: coverage never re-baselines check files that changed since it was
+  // written (only `select` resets it), so an edit cannot be laundered by running coverage again.
+  const old = readIntegrityRecord({ phaseRel: ev.phaseRel, root, io });
+  const changed = old.record === undefined ? [] : changedFromRecord(old.record, root, io);
+  if (changed.length > 0) reasons.push({ code: 'check_file_changed', message: `check_file_changed: ${changed.join(', ')}` });
+  else put(integrityRel(ev.phaseRel), JSON.stringify(fresh, null, 2) + '\n');
+  if (reasons.length > 0) {
+    ev.reasons = [...ev.reasons, ...reasons];
+    ev.coverageStatus = STATUS.INCOMPLETE;
+    if (ev.cov) ev.cov = { ...ev.cov, status: STATUS.INCOMPLETE, reasons: [...ev.cov.reasons, ...reasons] };
+  }
   put(ev.verdictRel, verdictText(ev, ev.cov.status, 'coverage'));
 }
 
@@ -505,6 +655,14 @@ function evaluateEnforce({ ev, root, io }) {
   const state = ev.loadedOrders.orders.state;
   if (state === 'invalid' || state === 'unreadable') return { status: STATUS.ERROR, results: [], reasons: [], cache: null };
   const tests = ev.applicable.filter((o) => o.verification === 'test');
+  // Nothing runs on an edited check: the coverage-time record must still match the disk.
+  const integrity = checkIntegrity({ ev, root, io });
+  if (integrity.flagged) {
+    const reason = `${integrity.code}: ${integrity.detail}`;
+    const results = tests.map((order) => ({ id: order.id, status: 'unverified', flagged: true, reason, located: false, kind: null, evidence: [], order_hash: orderHash(order) }));
+    const verdict = evaluateEnforcement({ results });
+    return { status: STATUS.FLAGGED, results, reasons: [{ code: integrity.code, message: integrity.detail }, ...verdict.reasons], cache: null, integrity: integrity.files };
+  }
   // The code id (the HEAD tree) is resolved once, and only when some order has mutants; without one the cache is not used.
   const code = tests.some(orderHasMutants) ? resolveCodeId({ root, io }) : null;
   let entries = code === null ? {} : mutantsLib.readCache({ root, io });
@@ -514,10 +672,10 @@ function evaluateEnforce({ ev, root, io }) {
     const applied = mutantsLib.applyMutants({ order, base, root, io, entries, useCache: !ev.noCache, ts: io.now().toISOString(), code });
     entries = applied.entries;
     if (applied.changed) dirty = true;
-    return applied.result;
+    return { ...applied.result, order_hash: orderHash(order) };
   });
   const verdict = evaluateEnforcement({ results });
-  return { status: verdict.status, results, reasons: verdict.reasons, cache: dirty ? entries : null };
+  return { status: verdict.status, results, reasons: verdict.reasons, cache: dirty ? entries : null, integrity: integrity.files, record: integrity.record };
 }
 
 /**
@@ -529,8 +687,16 @@ function runEnforce({ ev, root, io, put, rewriteVerdict }) {
   put(ev.verdictRel, verdictText(ev, ev.coverageStatus, 'enforce', STATUS.PENDING));
   const enforced = evaluateEnforce({ ev, root, io });
   try {
-    put(ENFORCEMENT_PATH, JSON.stringify({ schema: REPORT_SCHEMA, phase: ev.phaseRel, status: enforced.status, results: enforced.results }, null, 2) + '\n');
-    if (enforced.cache) put(mutantsLib.MUTANTS_PATH, mutantsLib.serializeCache(enforced.cache));
+    // Enforce itself writes MUTANTS.json (a protected file): the hash it leaves behind is the one later runs must find.
+    const cacheText = enforced.cache ? mutantsLib.serializeCache(enforced.cache) : null;
+    if (cacheText !== null && enforced.integrity !== undefined) enforced.integrity = { ...enforced.integrity, [mutantsLib.MUTANTS_PATH]: sha256Hex(cacheText) };
+    const report = { schema: REPORT_SCHEMA, phase: ev.phaseRel, status: enforced.status, results: enforced.results };
+    if (enforced.integrity !== undefined) report.integrity = { files: enforced.integrity };
+    put(ENFORCEMENT_PATH, JSON.stringify(report, null, 2) + '\n');
+    if (cacheText !== null) {
+      put(mutantsLib.MUTANTS_PATH, cacheText);
+      if (enforced.record !== undefined) writeAtomic(io, path.resolve(root, integrityRel(ev.phaseRel)), JSON.stringify({ ...enforced.record, files: enforced.integrity }, null, 2) + '\n', 'record');
+    }
     put(ev.verdictRel, verdictText(ev, ev.coverageStatus, 'enforce', enforced.status, [...ev.reasons, ...enforced.reasons]));
   } catch (e) {
     rewriteVerdict(STATUS.ERROR);
@@ -786,13 +952,15 @@ function runTrace({ ev, root, io, error }) {
   }
   const git = resolveCommitSha({ root, io });
   if (git.warning !== null) warnings.push(git.warning);
+  const enforcement = readEnforcement({ root, io });
   const records = buildRecords({
     applicable: ev.applicable,
     document: ev.loadedOrders.document,
     phaseRel: ev.phaseRel,
     plans: ev.inputs.plans,
     files: ev.files,
-    enforcement: readEnforcement({ root, io }),
+    enforcement,
+    changedFiles: changedSinceEnforce({ enforcement, root, io }),
     commitSha: git.sha,
     ts: io.now().toISOString(),
   });
@@ -942,8 +1110,8 @@ function runLoopCommand({ subcommand, rest, cwd, raw, error, io }) {
   let omitted = [];
   let enforced = null;
   try {
-    if (subcommand === 'select') omitted = writeSelectOutputs({ ev, config, put });
-    else if (subcommand === 'coverage') writeCoverageOutputs({ ev, put });
+    if (subcommand === 'select') omitted = writeSelectOutputs({ ev, config, put, root, io });
+    else if (subcommand === 'coverage') writeCoverageOutputs({ ev, root, io, put });
     else if (subcommand === 'enforce') {
       const rewriteVerdict = (enforcement) => bestEffortVerdict({ ev, io, root, generatedBy: 'enforce', enforcement, seq: seq++ });
       enforced = runEnforce({ ev, root, io, put, rewriteVerdict });

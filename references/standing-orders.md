@@ -11,8 +11,8 @@ The enum tables below are checked by a test against the constants the parser enf
 ## Parsing posture (untrusted input)
 
 - Parsed with js-yaml 4.3.2 (vendored) under `FAILSAFE_SCHEMA`: **every scalar is a string**. `outcome: 1` is the string `"1"`; `statement: true` is the string `"true"`.
-- **Anchors, aliases and merge keys are refused** before any expansion. A file containing `&name`, `*name` or `<<:` is rejected with `yaml_anchor_refused` and none of its content is parsed.
-- A bare merge key with no alias (`<<: {…}`) has nothing to merge under `FAILSAFE_SCHEMA`; it is read as a plain key named `<<` and rejected as `unknown_key`.
+- **Anchors and aliases are refused** (`&name`, `*name`) with `yaml_anchor_refused`, by a text scan that stops at the first one it finds and runs before any document is built: nothing is expanded, and the file is not loaded into orders. (The scan is a refusal, not a parse; it does not claim that no byte of the file was read.)
+- A bare merge key with no alias (`<<: {…}`) is not an anchor and is not caught by that scan. It has nothing to merge under `FAILSAFE_SCHEMA`, so it is read as a plain key named `<<` and rejected as `unknown_key` (or `missing_field`, when the order lacks a required field).
 - A NUL byte is rejected (`yaml_null_byte`). A leading BOM is stripped. CRLF and LF parse identically.
 - A duplicated mapping key is a parse error (`yaml_syntax`), never last-wins: a second `orders:` key would otherwise silently replace the first.
 - Unknown keys, unknown enum values and an unsupported `version` are **errors**, not warnings. Typos fail loudly. Every string field must be non-empty (`type_invalid` otherwise).
@@ -116,6 +116,8 @@ Any `check_*` key (and `check_mutants`) on a `backstop` order is kept but never 
 
 A prohibition and an invariant on one operation never conflict (both hold). Orders without an `operation` never conflict.
 
+**Operations compare canonically.** Two `operation` values name the same operation when they are equal after Unicode compatibility decomposition (NFKD), lower-casing, and removing combining marks and zero-width characters (U+200B to U+200D, U+2060, U+FEFF) anywhere, then trimming surrounding whitespace: `refund.amount`, `Refund.Amount`, ` refund.amount `, a fullwidth `ｒefund.amount` and `refund.amount` with a zero-width space inside are one operation, and case and diacritics do not distinguish names, so `İ` (U+0130) and `i` match, as do `é` and `e` (precomposed or decomposed). The dotless `ı` (U+0131) is a distinct letter and does not match `i`. Anything else is a different operation (`refund.amounts` is not `refund.amount`).
+
 A `test`-tier order whose `check_target` does not exist under the project root is reported under `missingChecks` with warning `check_target_missing`. It is not a conflict; whether it blocks planning is the `standing-orders.block_on` setting.
 
 ## APPLICABLE.md rendering
@@ -124,7 +126,7 @@ A `test`-tier order whose `check_target` does not exist under the project root i
 
 - A header stating that the orders apply **in addition to** the phase's own `must_haves`, never instead of them.
 - Orders in deterministic order: `test` tier before `backstop`, then by `id`.
-- Whole orders are packed while the total, including the footer, stays within `standing-orders.max_bytes` (default 6000) measured in UTF-8 bytes. An order is never truncated mid-body.
+- Whole orders are packed while the total, including the header and the footer, stays within `standing-orders.max_bytes` (default 6000, minimum 512) measured in UTF-8 bytes. An order is never truncated mid-body.
 - Each order block ends with a `- Project as:` line: the exact `must_haves` item the planner copies into a plan (see *Projection*).
 - Every rendered scalar is one line; control characters are replaced with U+FFFD.
 - An applicable order that is stale (see *Trace*) gets a `- Stale: <reason> since last traced in <phase>; re-check this order before planning` line after `- Source:`, inside its block, so the byte cap counts it. With no `TRACE.jsonl`, or no stale applicable order, the output is unchanged.
@@ -136,9 +138,9 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts`, `coverage`, `enforce` and `trace` write nothing. `impact`, `stale` and `validate` only read, and answer either way. Read with gsd-core's coercion (`Boolean(value)`), so the string `"false"` counts as on. |
+| `standing-orders.enabled` | boolean | `false` | The capability's `activationKey`. While it is not true, every loop hook is inactive and `select`, `conflicts`, `coverage`, `enforce` and `trace` write nothing. `impact`, `stale` and `validate` only read, and answer either way. **Only the JSON boolean `true` enables.** Any other value (the strings `"true"`, `"false"` and `"yes"`, the number `1`, `null`) leaves the capability disabled and adds warning `enabled_not_boolean`; this reader does not use gsd-core's `Boolean(value)` coercion, under which `"false"` would count as on. |
 | `standing-orders.block_on` | enum | `conflict` | What blocks planning. An unknown value falls back to `conflict` with warning `config_invalid`. |
-| `standing-orders.max_bytes` | number | `6000` | UTF-8 byte cap for `APPLICABLE.md`. Must be a whole number ≥ 0; anything else (including the string `"6000"`) falls back to `6000` with warning `config_invalid`. |
+| `standing-orders.max_bytes` | number | `6000` | UTF-8 byte cap for `APPLICABLE.md`. A whole number; the **minimum is 512** (the fixed header and footer need it): a smaller whole number (0 to 511) is raised to 512 with warning `max_bytes_below_minimum`. Anything else (including the string `"6000"`) falls back to `6000` with warning `config_invalid`. |
 
 - **block_on** — one of: `conflict` | `conflict_or_missing` | `never`
 
@@ -170,7 +172,15 @@ Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not ye
 - **Projection.** Every applicable order must also appear as a structured `must_haves` item in some plan, written exactly as `APPLICABLE.md`'s `Project as` line gives it:
   - a `test` order as a `prohibitions` item `{statement: "<id>: <statement>", status: resolved, verification: test, check_kind, check_target}` (plus `check_rule` for `lint-rule` and the fixtures when the order has them). It counts when the statement starts with `<id>:`, `status` is `resolved`, `verification` is `test`, `check_kind` matches, `check_target` and each fixture the order has match (paths compared as below), and for `lint-rule` `check_rule` matches;
   - a `backstop` order as a `truths` item `{statement: "<id>: <statement>", verification: backstop}`. It counts when the statement starts with `<id>:` and `verification` is `backstop`. `gsd-verifier` reports such a truth `insufficient_spec`, never passed.
-- **Check files.** For an applicable `test` order: its `check_target` when `check_kind` is `node-test`, and its `check_violation_fixture` and `check_clean_fixture` for either kind. A `lint-rule` order's `check_target` is the code the rule lints, so it is not a check file. Its `check_mutants` paths (for either kind) and `.planning/standing-orders/MUTANTS.json` (while it has mutants) are check files too. Paths are compared canonically: surrounding whitespace trimmed, backslashes to `/`, `.` and `..` segments resolved, repeated and trailing `/` removed, leading `./` removed, and **case ignored** (macOS and Windows file systems ignore it, so `Tests/X.test.cjs` names the same file). Otherwise they must be equal: `tests/x.test.cjs.bak` is a different file.
+- **Check files.** For **every** `test` order in `ORDERS.yaml`, applicable to this phase or not (an order that does not apply here can still be edited away): its `check_target` when `check_kind` is `node-test`, and its `check_violation_fixture` and `check_clean_fixture` for either kind. A `lint-rule` order's `check_target` is the code the rule lints, so it is not a check file. This is a documented deviation from the wording of PRD R11 (PRD-0001: "a plan never lists the order's check target"): the lint-rule target is the code under the rule, which a plan must be free to edit (ADR-0001 A6). Its `check_mutants` paths (for either kind) and `.planning/standing-orders/MUTANTS.json` (while any order has mutants) are check files too. **`.planning/standing-orders/ORDERS.yaml` is protected the same way** whenever the capability is enabled: whoever can edit it can delete the order that names a check. Paths are compared canonically: surrounding whitespace trimmed, backslashes to `/`, `.` and `..` segments resolved, repeated and trailing `/` removed, leading `./` removed, and **case ignored** (macOS and Windows file systems ignore it, so `Tests/X.test.cjs` names the same file). Otherwise they must be equal: `tests/x.test.cjs.bak` is a different file.
+- **What a `files_modified` entry can cover.** An entry covers a protected file when it is:
+  - the file itself, in any spelling above;
+  - a **directory** that holds it: an entry ending in `/`, or one that is a directory on disk. `tests`, `tests/`, `./` and `.` cover `tests/x.test.cjs`. An entry with no trailing `/` that does not exist as a directory is a file path, never a prefix;
+  - a **glob** matching it, with the same `*`, `**` and `?` as scope matching plus `{a,b}` alternatives: `tests/**`, `tests/**/`, `tests/*.cjs`, `**/*.test.cjs`, `tests/{x,y}.test.cjs`. A trailing `/` on a glob names the directory. A bracket class (`[a]`, `[!b]`, `[x-z]`) is treated as a wildcard that may over-match (safe direction), never as a literal. A glob with more than 8 brace groups or over 1024 characters is not expanded; it covers every protected file. A glob also covers a file when it matches a directory above it;
+  - an **absolute** path inside the project root, which is made root-relative first. An absolute path outside the root, or a drive path such as `C:\proj\x`, names no file of this project and is ignored;
+  - a **symbolic link**, or a path under a linked directory, that resolves to a protected file (compared by real path; only for entries that exist).
+
+  An entry that covers no protected file (`src/**`, `docs/`) does not trip the rule. The reason `check_file_modified` is raised once per protected file covered and names it, and `checkFileEdits` lists the same files.
 - **Unusable rules.** When `ORDERS.yaml` is invalid or unreadable, `APPLICABLE.md` says so on its own line (`ORDERS.yaml could not be used (<state>): planning is blocked until it is fixed. Run standing-orders validate.`), so the planner never reads an empty list as "no rules apply". `select` writes the verdict first, then `APPLICABLE.md`, then `CONFLICTS.json`.
 
 ## Blocking rules
@@ -194,7 +204,7 @@ A missing `ORDERS.yaml` is not a block: it means there are no rules yet (warning
 | `no_plans` | At least one order applies and the phase has no plans. |
 | `uncited` | An applicable order is cited by no plan's `must_haves`. |
 | `not_projected` | An applicable order is cited but no readable plan has its projection (see *Projection*). An uncited order is reported `uncited` only. |
-| `check_file_modified` | A plan lists a check file of an applicable `test` order in `files_modified`. Checks are fixed before the implementing phase. |
+| `check_file_modified` | A plan covers a check file of any `test` order, or `ORDERS.yaml`, in `files_modified` (see *Check files* for what covers). Checks are fixed before the implementing phase. |
 
 ## Verdict file: `<phase dir>/STANDING-ORDERS.md`
 
@@ -245,6 +255,24 @@ with the project root as working directory (no shell; the statement is cut to 50
 Any other reason is the host's own. `.planning/standing-orders/ENFORCEMENT.json` is `{ schema: 1, phase, status, results }`; each result is `{ id, status, flagged, reason, located, kind, evidence }` as the host returned it. Each unproven order adds an `enforcement_flagged` reason to the verdict body.
 
 `block_on` does not apply to enforcement: it decides what blocks planning only.
+
+### Integrity of check files
+
+`standing-orders coverage` also writes `<phase dir>/STANDING-ORDERS-INTEGRITY.json`, **before** the verdict, so no verdict stands without its record: `{ schema: 1, phase, orders: { path, sha256 }, files: { <protected path>: sha256 }, plans: { <plan file>: sha256 } }`. `sha256` is the hex SHA-256 of the file's text; `null` means the file did not exist, and a file that could not be read is recorded as `unreadable:<kind>` (never equal to a hash). `files` holds every protected file of every `test` order, applicable or not. `coverage` writes a record whenever the capability is enabled, even with no `ORDERS.yaml` and no orders (then `orders.sha256` is `null`). `standing-orders select` deletes the record, so a stale one never survives a new selection. **`coverage` never re-baselines changed check files:** when a record already exists and a protected file or `ORDERS.yaml` no longer matches it, `coverage` is `incomplete` with the reason `check_file_changed: <paths>` and leaves the old record untouched; only `select` resets the record (select, then coverage, to accept a deliberate change). A rerun with identical hashes rewrites the record, so changed plans are re-hashed. A protected file larger than 1 MiB cannot be hashed: `coverage` is `incomplete` with `check_file_too_large: <path>`, and `enforce` treats any `unreadable:*` value, recorded or current, as changed.
+
+`standing-orders enforce` compares the record with the disk **before it runs any check**:
+
+| Reason code | Condition | Result |
+|---|---|---|
+| `check_file_changed` | A recorded protected file, or `ORDERS.yaml`, changed, was deleted, or appeared where none was recorded (a missing file is recorded as `null`). | `enforcement: flagged`; every applicable `test` order's result is flagged with the changed paths; no check runs. Enforcement is flagged even when no `test` order is applicable, so a deleted `ORDERS.yaml` cannot read as clear while its record stands. An `unreadable:*` value, recorded or current, counts as changed. |
+| `integrity_missing` | The record is absent, a symbolic link, unreadable, not valid JSON, not an object of the expected shape, or for another phase. | `enforcement: flagged`, no check runs. Fix: run `standing-orders coverage` (if a check file changed since an older record, `select` first). This applies to every project, including one with no `ORDERS.yaml`: without a record `enforce` is always flagged, so deleting both `ORDERS.yaml` and the record cannot read as clear. |
+| `plan_changed` | A plan's hash differs from the record. | A warning only (executors may touch plans). Enforcement is not flagged for it. |
+
+`enforce` itself writes `MUTANTS.json` (a protected file) when it learns new mutant outcomes; it records the new hash in `STANDING-ORDERS-INTEGRITY.json`, so a second wave is not flagged for its own write. Any other write to `MUTANTS.json` after `coverage` (for example `standing-orders mutants --run`) is a change: run `select`, then `coverage` again (coverage alone refuses to re-baseline it).
+
+`ENFORCEMENT.json` gains two additive keys: each result carries `order_hash` (the `sha256:` hash of the order it proved, as in *Trace*), and `integrity: { files: { <protected path>: sha256 } }` holds the hashes `enforce` verified. `trace` uses both: a green, unflagged result counts as `proven` only if it carries an `order_hash` equal to the order's current hash **and** the report carries `integrity.files` whose hashes still match the disk. A result with another `order_hash`, a result without `order_hash`, or a report without `integrity` is `unenforced`; a protected file whose current hash differs from `integrity.files` (or is unreadable) makes the disposition `flagged`. A report written before these keys existed proves nothing.
+
+The record is a project file: a deliberate forger who can write the check files can rewrite the record too. That is the same trust boundary as the check files themselves (ADR-0001 §6). The record closes silent, unlisted and after-the-fact edits, and the deleted-`ORDERS.yaml` hole (a missing record is itself flagged); it does not stop a determined adversary with write access.
 
 ## Trace
 
@@ -406,7 +434,7 @@ gsd-tools standing-orders enforce   (--phase <N> | --phase-dir <dir>) [--req-ids
 
 - `standing-orders select` writes `.planning/standing-orders/APPLICABLE.md`, `.planning/standing-orders/CONFLICTS.json` and the verdict (`coverage: pending`).
 - `standing-orders conflicts` computes the same blocking decision and writes nothing.
-- `standing-orders coverage` writes only the verdict, with `conflicts` recomputed and `coverage` decided.
+- `standing-orders coverage` writes the integrity record (see *Integrity of check files*) and then the verdict, with `conflicts` recomputed and `coverage` decided.
 - `standing-orders enforce` writes the verdict (`enforcement: pending` first, then the result, with `conflicts` and `coverage` recomputed) and `.planning/standing-orders/ENFORCEMENT.json`.
 - `--ws <name>` is accepted and ignored (the host has already applied it through `GSD_WORKSTREAM`). Any other flag, a positional argument, a flag without its value, or giving both or neither of `--phase` and `--phase-dir` is a usage error.
 - Writes are atomic (temporary file, then rename).
@@ -425,6 +453,11 @@ Direct-CLI exit codes for these four: 0 clear (or disabled); 1 blocked, coverage
 | `internal_error` | error | An unexpected failure inside the router; nothing is assumed to be written. |
 | `orders_file_missing` | warning | No `ORDERS.yaml`; treated as no rules. |
 | `config_invalid` | warning | A config value was rejected and its default used. |
+| `enabled_not_boolean` | warning | `standing-orders.enabled` is set but is not a boolean; the capability stays disabled. |
+| `max_bytes_below_minimum` | warning | `standing-orders.max_bytes` is below 512; 512 is used. |
+| `plan_changed` | warning | A plan changed since `coverage` recorded it (`enforce`). |
+| `check_file_changed` | verdict reason | A recorded check file or `ORDERS.yaml` changed since `coverage` (`enforce`). |
+| `integrity_missing` | verdict reason | `enforce` found no usable integrity record for the phase. |
 | `phase_dir_unreadable` | warning | The phase directory could not be listed; no files or plans were read. |
 | `doc_unreadable` | warning | A planning document could not be read and was skipped. |
 | `doc_too_large` | warning | A planning document over 1 MiB was skipped. |

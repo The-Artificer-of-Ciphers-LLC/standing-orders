@@ -197,8 +197,9 @@ describe('skills: the harden skill', () => {
 
   // row 54, K2
   it('manifestPhase6', () => {
-    assert.equal(MANIFEST.version, '0.6.0');
-    assert.equal(PACKAGE.version, '0.6.0');
+    const [major, minor] = MANIFEST.version.split('.').map(Number);
+    assert.ok(major > 0 || minor >= 6, `manifest version ${MANIFEST.version} is at least 0.6.0`);
+    assert.equal(PACKAGE.version, MANIFEST.version);
     assert.deepEqual(MANIFEST.skills, [PROMOTE, REVIEW, HARDEN]);
     assert.deepEqual(MANIFEST.commands[0].subcommands, ['select', 'conflicts', 'coverage', 'enforce', 'trace', 'impact', 'stale', 'validate', 'promote', 'semantic', 'mutants']);
     // no new loop wiring: the same five steps, five gates and one contribution, none of them naming the new skill or command

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "standing-orders",
   "role": "feature",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "title": "Standing Orders",
   "description": "Project-wide, context-scoped business rules: conflict-gated planning, independent fail-first checks, and rule-to-check traceability.",
   "tier": "full",
