@@ -153,6 +153,8 @@ Keys live in `.planning/config.json` as **nested** objects, the way gsd-core sto
 | `plan:post` | gate, blocking | `coverage == complete`. |
 | `execute:wave:post` | step `standing-orders enforce` | Runs every applicable `test` order's check through gsd-core's fail-first prover; writes `ENFORCEMENT.json` and the verdict's `enforcement`. |
 | `execute:wave:post` | gate, blocking | `enforcement == clear`. |
+| `discuss:post` | step, skill `standing-orders-promote` | Offers each resolved `SPEC.md` prohibition and `CONTEXT.md` decision of the phase as a standing order, one question per candidate, and adds each confirmed one with `standing-orders promote --add`. Never promotes in auto mode. `onError: skip`. |
+| `discuss:post` | gate, `agentVerdict` (advisory, never blocks) | The skill `standing-orders-conflict-review`: runs `select`, proposes semantic conflicts between the applicable orders and the phase `SPEC.md`, and asks the user to confirm, dismiss (with a reason) or defer each one through `standing-orders semantic`. Auto mode only proposes. `onError: skip`. |
 | `ship:pre` | step `standing-orders trace` | Appends one `TRACE.jsonl` record per applicable order and commits that file alone through the host's commit tool. Sole writer of the trace (ADR-5057). `onError: skip`: a step never blocks ship. |
 
 Every hook has `when: standing-orders.enabled`. gsd-core 1.19–1.20 does not yet run third-party `plan:pre` command steps or gates ([open-gsd/gsd-core#5982](https://github.com/open-gsd/gsd-core/issues/5982)); until it does, the planner-run `select` is the `plan:pre` check and the `plan:post` gates are the mechanical block (ADR-0001 A5). There is no `verify:pre` hook: orders reach `gsd-verifier` as projected `must_haves` (ADR-0001 A6, [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984)).
@@ -297,6 +299,46 @@ Direct-CLI exit codes: `trace` as the loop commands below (0 ok or disabled, 1 u
 | `trace_line_invalid` | warning | A `TRACE.jsonl` line is not a valid record and was skipped. |
 | `commit_unresolved` | warning | git could not name the shipped commit; records carry `commit_sha: null`. |
 | `trace_not_committed` | warning | `TRACE.jsonl` was written but not committed; the message says why. |
+
+## Commands: `standing-orders promote` and `standing-orders semantic`
+
+```
+gsd-tools standing-orders promote --candidates (--phase <N> | --phase-dir <dir>) [--raw]
+gsd-tools standing-orders promote --add '<order JSON>' [--raw]
+gsd-tools standing-orders semantic propose (--phase <N> | --phase-dir <dir>) --findings '<JSON list>' [--auto] [--raw]
+gsd-tools standing-orders semantic resolve (--phase <N> | --phase-dir <dir>) --id <S-n> --status <resolved|dismissed|unresolved> [--reason <text>] [--auto] [--raw]
+gsd-tools standing-orders semantic list    (--phase <N> | --phase-dir <dir>) [--raw]
+```
+
+These are the commands the two `discuss:post` skills call (ADR-0001 A8). Either can also be run by hand.
+
+- `standing-orders promote --candidates` reads the phase directory's `*-SPEC.md` (not `UI-SPEC.md` or `AI-SPEC.md`) and `*-CONTEXT.md` and lists what could become an order: every `resolved` row of the SPEC `## Prohibitions` table (origin `spec-prohibition`; `verification` `test` when the row says test, otherwise `backstop`; requirement ids from the Requirement cell), and every `- **D-NN:**` line inside `<decisions>` (origin `context-decision`). Each candidate has `{ origin, source, statement, requirements, verification, already_promoted, promoted_as }`. `source` is a label such as `.planning/phases/03-billing/03-SPEC.md prohibition 2` or `.planning/phases/03-billing/03-CONTEXT.md D-04`. A candidate is `already_promoted` when an order carries that `source`, or the same statement; it is `null` when `ORDERS.yaml` is invalid (warning `orders_unusable`). At most 200 candidates (`truncated`). A phase file that is a link outside the project, over 1 MiB or unreadable is skipped (warning `phase_file_skipped`). It writes nothing and does not require `standing-orders.enabled`.
+- `standing-orders promote --add` adds **exactly one** order, given as a JSON object with the keys of an order in `ORDERS.yaml`. A list, or `--add` given twice, is refused (`batch_refused`): each order is confirmed on its own. The order is inserted as text at the end of the `orders:` block, so comments and layout survive; a missing `ORDERS.yaml` is created, a missing `orders:` key is added, and `orders: []` is replaced. The whole file is then re-parsed. Nothing is written when the existing file is invalid (`orders_unusable`), the id exists (`duplicate_id`), the new order is invalid (`invalid_order`, with the parser's findings), the layout cannot take a text insertion or an existing order would change (`insert_unsupported`, with a `paste` block to add by hand), or the result exceeds 256 KiB (`file_too_large`). Requires `standing-orders.enabled`. Result: `{ schema: 1, subcommand: "promote", ok, mode: "add", added, written }`.
+- `standing-orders semantic` keeps the LLM conflict pass's findings in `<phase dir>/STANDING-ORDERS-SEMANTIC.json`: `{ schema: 1, phase, findings: [{ id, orders, statement, status, reason, proposed_by, resolved_by, ts }] }`. `status` is one of `unresolved`, `resolved` (a human confirmed the conflict) or `dismissed` (a human ruled it out, with a non-empty `reason`). The file is validated on every read; an invalid one (for example a dismissed finding with a blank reason) is refused (`semantic_unusable`) and never overwritten.
+  - `propose` adds findings as `unresolved` with ids `S-1`, `S-2`, ...: 1 to 50 per call (`too_many_findings`, `invalid_finding`), each naming orders that exist in `ORDERS.yaml` (`unknown_order`) and a statement of at most 1000 characters. A finding already on file (same orders, same statement) is skipped and reported in `duplicates`. `--auto` is allowed: proposing is not deciding.
+  - `resolve` records a human decision. `dismissed` needs `--reason` with text (`reason_required`). With `--auto` every decision is refused: dismissing gives `auto_never_dismisses`, and confirming or deferring gives `auto_cannot_confirm`. An unknown id gives `finding_not_found`. `unresolved` defers a finding and clears its reason.
+  - `list` prints the findings and their counts; it does not require `standing-orders.enabled`.
+  - Findings are advisory: a `resolved` finding never blocks planning. It is fixed by editing `ORDERS.yaml`, and the deterministic `conflicts` gate then enforces the change.
+- `propose`, `resolve` and `promote --add` require `standing-orders.enabled`; disabled, they report `disabled` and write nothing. `--ws <name>` is accepted and ignored. With `--raw`, a failure is also printed as one JSON line `{ schema: 1, subcommand, ok: false, errors: [{ code, message }], written }`.
+
+Direct-CLI exit codes: 0 done (or disabled); 1 a usage error or a refusal; 2 a file could not be read (`path_outside_cwd`, `file_not_found`, `file_unreadable`, `file_too_large`).
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `batch_refused` | error | `promote --add` was given more than one order. |
+| `duplicate_id` | error | `promote --add`: an order with that id already exists. |
+| `invalid_order` | error | `promote --add`: the order is not valid; the parser's findings are attached. |
+| `insert_unsupported` | error | `promote --add`: the `orders:` layout cannot take a text insertion, or an existing order would have changed; add the returned `paste` block by hand. |
+| `orders_unusable` | error / warning | `ORDERS.yaml` is invalid or unreadable: an error for `promote --add` and `semantic propose`, a warning for `promote --candidates`. |
+| `phase_file_skipped` | warning | `promote --candidates` skipped a SPEC or CONTEXT file it could not read safely. |
+| `reason_required` | error | A dismissal without a reason. |
+| `auto_never_dismisses` | error | `semantic resolve --auto --status dismissed`: auto mode never dismisses a finding. |
+| `auto_cannot_confirm` | error | `semantic resolve --auto` with any other status: findings need a human. |
+| `finding_not_found` | error | No finding with that id. |
+| `unknown_order` | error | A proposed finding names an order that is not in `ORDERS.yaml`. |
+| `too_many_findings` | error | More than 50 findings in one `propose`. |
+| `invalid_finding` | error | A proposed finding is malformed (no orders, empty or over-long statement, unknown key, or none at all). |
+| `semantic_unusable` | error | `STANDING-ORDERS-SEMANTIC.json` is invalid, a link, or over 4 MiB; it is not overwritten. |
 
 ## Commands: `standing-orders select | conflicts | coverage | enforce`
 

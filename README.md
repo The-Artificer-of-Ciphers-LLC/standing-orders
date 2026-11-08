@@ -14,6 +14,8 @@ The name comes from the military term: a standing order stays in force across ev
 | Validate a rules file right now | [How to validate ORDERS.yaml](docs/how-to/validate-standing-orders.md) |
 | Unblock a wave that Standing Orders stopped | [How to resolve a wave blocked by Standing Orders](docs/how-to/resolve-standing-orders-enforcement.md) |
 | See which shipped phases a rule change affects | [How to find what a rule change affects](docs/how-to/find-what-a-rule-change-affects.md) |
+| Turn a phase's settled rules into standing orders | [How to promote a phase's rules to standing orders](docs/how-to/promote-phase-rules-to-standing-orders.md) |
+| Check orders against a spec for contradictions in meaning | [How to review semantic conflicts between orders and a spec](docs/how-to/review-semantic-conflicts.md) |
 | Exact schema, matching rules, conflict kinds, report shape, error codes | [`references/standing-orders.md`](references/standing-orders.md) |
 | Why it is shaped this way | [ADR-0001](docs/adr/0001-standing-orders-architecture.md) |
 | What it must do, and the evidence behind it | [PRD-0001](docs/prd/0001-standing-orders.md) |
@@ -21,7 +23,7 @@ The name comes from the military term: a standing order stays in force across ev
 ## Install
 
 ```bash
-gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.4.0
+gsd capability install https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders.git#v0.5.0
 gsd config-set standing-orders.enabled true
 ```
 
