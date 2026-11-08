@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-07
-- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Amended again 2026-11-08 (phase 4, [#5](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/5)) — A7, the trace step commits its own ledger. Amended again 2026-11-08 (phase 5, [#6](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/6)) — A8, the LLM conflict pass moves to `discuss:post`, and promotion writes through a command. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
+- **Amended:** 2026-11-07 (phase 1, [#2](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/2)) — open questions 1–3 answered from gsd-core source and by the maintainer; rollout table corrected after the phase-coverage check; §3 semantics made exact; see *Amendments*. Amended again 2026-11-07 (phase 2, [#3](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/3)) — A5, the `plan:pre` host dispatch gap. Amended again 2026-11-08 (phase 3, [#4](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/4)) — A6, verification by projection instead of a `verify:pre` contribution, and the `engines.gsd` pin. Amended again 2026-11-08 (phase 4, [#5](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/5)) — A7, the trace step commits its own ledger. Amended again 2026-11-08 (phase 5, [#6](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/6)) — A8, the LLM conflict pass moves to `discuss:post`, and promotion writes through a command.amp; Amended again 2026-11-08 (phase 7, [#15](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/15)) — A9, integrity of check files and gate inputs. Tracking epic: [#1](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/1).
 - **Requirements:** [PRD-0001](../prd/0001-standing-orders.md)
 - **Host contracts relied on (gsd-core):** ADR-857 (Capability system, Loop Extension Points), ADR-894 (declaration format), ADR-1244 (third-party capabilities: versioned manifest, runtime overlay, consent), ADR-550 (spec-phase probe contract), ADR-5057 (one owner per workflow verdict)
 - **Sibling pattern:** [`projects-sync-capability`](https://github.com/The-Artificer-of-Ciphers-LLC/projects-sync-capability) `capability.json`
@@ -319,6 +319,36 @@ Decision, confirmed by the maintainer on 2026-11-08:
 - Promotion (`standing-orders-promote`, a `discuss:post` skill step) writes only through `standing-orders promote --add`, which adds exactly one order per call and refuses a list. "One confirmation each" is therefore a property of the command, not only of the skill's wording. The order is inserted into `ORDERS.yaml` as text, so comments and layout survive, and the result is re-parsed: if it does not parse, or any existing order's hash changed, nothing is written and the command returns the YAML to paste by hand. `promote --candidates` lists the phase's resolved `SPEC.md` prohibitions and `CONTEXT.md` decisions, and marks the ones already promoted by their `source`.
 
 Known limit, stated: how an orchestrator evaluates an `agentVerdict` gate is host prose, not code; gsd-core ships no deterministic runner for it.
+
+## Amendments (2026-11-08, phase 7)
+
+**A9 — Integrity of check files and gate inputs.** An adversarial review of `main` at the end of phase 6 ([#15](https://github.com/The-Artificer-of-Ciphers-LLC/standing-orders/issues/15)) found four gaps:
+
+- The R11 check-file rule (A6) matched `files_modified` entries only as exact paths. A plan listing a directory, a glob, an absolute path or a symlink that covered a check file still passed.
+- A deleted `ORDERS.yaml` read as "zero orders", which cleared every gate.
+- Nothing noticed an executor editing a check file that it had not listed.
+- `trace` trusted `ENFORCEMENT.json` by phase alone.
+
+Decision, confirmed by the maintainer on 2026-11-08:
+
+- **Protected set.** The protected set is, for every `test` order in `ORDERS.yaml` (applicable to the phase or not): a `node-test` order's `check_target`, the violation and clean fixtures, every `check_mutants` path, and `MUTANTS.json` when any order has mutants. `ORDERS.yaml` itself is in the set whenever the capability is enabled. A `lint-rule` order's `check_target` stays outside it: that file is the code under the rule (A6), a deliberate narrowing of PRD R11's wording.
+- **Plan entries are read the safe way.** A `files_modified` entry counts as an edit of every protected file it could cover:
+  - an exact path, in any spelling;
+  - a directory, written with a trailing `/` or existing on disk as one;
+  - a glob, using the same glob rules as `scope.paths`;
+  - an absolute path inside the project;
+  - an existing path whose real location is a protected file.
+- **Integrity record.** Before writing the verdict, `coverage` writes `<phase dir>/STANDING-ORDERS-INTEGRITY.json`. It records the `sha256` of every protected file (or `null` when the file is absent) and of each graded plan. `select` resets it. Before running any check, `enforce` re-hashes the protected files:
+  - Any difference flags every applicable `test` order with `check_file_changed: <paths>`, and no check is run, so an edited check is never executed. This includes a deleted or newly created `ORDERS.yaml`.
+  - A missing, unreadable or wrong-phase record is `integrity_missing`, which is flagged.
+  - A changed plan only adds the warning `plan_changed`, because executors legitimately touch plans.
+- **Trace binding.** Each enforcement result carries its order's `order_hash`, and `ENFORCEMENT.json` carries the hashes enforce verified. `trace` records `proven` only when both still match. Otherwise the order is `unenforced` (a different order hash) or `flagged` (a check file changed).
+- **Smaller corrections from the same review:**
+  - Only a JSON `true` enables the capability; the string `"false"` used to enable it.
+  - Conflict detection compares `operation` names after NFC normalization, trimming and lower-casing.
+  - `max_bytes` has a floor of 512 bytes, and the header and footer count against the cap.
+
+Known limit, stated: the integrity record is a project file. An executor that deliberately rewrites both a check and the record defeats it, which is the same trust boundary §6 accepts for the check files themselves. It closes the silent and unlisted edits and the deleted-`ORDERS.yaml` hole. Acceptance criterion 4 (`backstop` yields `insufficient_spec`) depends on gsd-verifier's grading prose (A6), which no test in this repository can run. It is stated here next to [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984).
 
 ## Alternatives considered
 
