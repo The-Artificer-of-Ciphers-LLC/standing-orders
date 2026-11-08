@@ -347,7 +347,7 @@ Decision, confirmed by the maintainer on 2026-11-08:
 - **Trace binding.** Each enforcement result carries its order's `order_hash`, and `ENFORCEMENT.json` carries the hashes enforce verified. `trace` records `proven` only when both are present and still match. Otherwise the order is `unenforced` (a missing or different order hash, or no recorded hashes) or `flagged` (a check file changed).
 - **Smaller corrections from the same review:**
   - Only a JSON `true` enables the capability; the string `"false"` used to enable it.
-  - Conflict detection compares `operation` names after NFKC normalization, with zero-width characters removed, then trimmed and lower-cased.
+  - Conflict detection compares `operation` names after compatibility decomposition (NFKD) and lower-casing, with combining marks and zero-width characters removed, then trimmed (so `İ` matches `i`).
   - `max_bytes` has a floor of 512 bytes, and the header and footer count against the cap.
 
 Known limit, stated: the integrity record is a project file. An executor that deliberately rewrites both a check and the record, or re-plans the phase from `select`, defeats it. That is the same trust boundary §6 accepts for the check files themselves. It closes the silent and unlisted edits and the deleted-`ORDERS.yaml` hole. Acceptance criterion 4 (`backstop` yields `insufficient_spec`) depends on gsd-verifier's grading prose (A6), which no test in this repository can run. It is stated here next to [open-gsd/gsd-core#5984](https://github.com/open-gsd/gsd-core/issues/5984).

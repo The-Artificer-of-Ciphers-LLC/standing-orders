@@ -112,9 +112,25 @@ describe('conflicts: operations compare canonically', () => {
     assert.equal(pair('r.amt', 'R.Amt ', ['variant', 'prohibition']).length, 1);
   });
 
+  // diacritics and case do not distinguish operations: U+0130 lower-cases to i + U+0307
+  it('operationsCompareWithoutCaseOrDiacritics', () => {
+    const dotted = String.fromCharCode(0x130);
+    for (const [a, b] of [[`${dotted}.x`, 'i.x'], [`r${NFC}.amt`, 'r' + 'e.amt'], [`r${NFC}.amt`, 'R' + NFD + '.AMT']]) {
+      const found = pair(a, b);
+      assert.equal(found.length, 1, JSON.stringify([a, b]));
+      assert.equal(found[0].kind, 'variant-outcome');
+    }
+  });
+
+  // dotless i (U+0131) is a different letter, not i with a mark removed
+  it('dotlessIStaysDistinct', () => {
+    assert.deepEqual(pair(String.fromCharCode(0x131) + '.x', 'i.x'), []);
+    assert.deepEqual(pair('r.amt', 'r.amount'), []);
+  });
+
   // matrix row 22: negative space
   it('distinctOperationsStayDistinct', () => {
-    for (const [a, b] of [['r.amt', 'r.amts'], ['r.amt', 'r.amt.x'], ['r.amt', 'r_amt'], ['r.amt', 'r. amt'], [`r.${NFC}`, 'r.e']]) {
+    for (const [a, b] of [['r.amt', 'r.amts'], ['r.amt', 'r.amt.x'], ['r.amt', 'r_amt'], ['r.amt', 'r. amt']]) {
       assert.deepEqual(pair(a, b), [], JSON.stringify([a, b]));
     }
   });
