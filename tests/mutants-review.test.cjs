@@ -199,7 +199,7 @@ describe('F2: resolveCodeId', () => {
       ['dirty', { 'rev-parse': TREE, status: ' M src/a.js\n' }],
       ['untracked', { 'rev-parse': TREE, status: '?? new.js\n' }],
       ['not a tree id', { 'rev-parse': 'fatal: not a git repository', status: '' }],
-      ['upper case', { 'rev-parse': TREE.toUpperCase().replace(/A/g, 'A'), status: '' }],
+      ['upper case', { 'rev-parse': TREE.toUpperCase(), status: '' }],
       ['too short', { 'rev-parse': 'abc123', status: '' }],
       ['rev-parse fails', { 'rev-parse': new Error('git not found'), status: '' }],
       ['status fails', { 'rev-parse': TREE, status: new Error('timed out') }],
